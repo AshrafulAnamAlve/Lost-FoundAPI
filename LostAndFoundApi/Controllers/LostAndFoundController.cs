@@ -13,10 +13,92 @@ namespace LostAndFoundApi.Controllers
         private readonly AppDbContext context;
         private readonly IItemSimilarityService itemSimilarityService;
 
+        // Show at most this many suggestions, best first.
+        private const int MaxSuggestions = 5;
+
         public LostAndFoundController(AppDbContext context, IItemSimilarityService itemSimilarityService)
         {
             this.context = context;
             this.itemSimilarityService = itemSimilarityService;
+        }
+
+        // Score every found item against a lost item, drop the owner's own posts and
+        // anything below the match threshold, and return the best suggestions.
+        private async Task<List<object>> FindFoundMatchesAsync(Lost lost)
+        {
+            var candidates = context.Founds
+                .Where(f => lost.userId == 0 || f.userId != lost.userId)
+                .ToList();
+
+            var scored = new List<(Found item, ItemMatchResult result)>();
+            foreach (var found in candidates)
+            {
+                var result = await itemSimilarityService.EvaluateLostFoundAsync(lost, found);
+                scored.Add((found, result));
+            }
+
+            return scored
+                .Where(x => x.result.Score >= ItemSimilarityService.MatchThreshold)
+                .OrderByDescending(x => x.result.Score)
+                .Take(MaxSuggestions)
+                .Select(x => (object)new
+                {
+                    x.item.id,
+                    x.item.itemName,
+                    x.item.category,
+                    x.item.description,
+                    x.item.location,
+                    x.item.brand,
+                    x.item.color,
+                    x.item.imageUrl,
+                    x.item.userName,
+                    x.item.phoneNumber,
+                    x.item.email,
+                    x.item.userId,
+                    matchPercent = Math.Round(x.result.Score * 100, 2),
+                    confidence = x.result.Confidence,
+                    matchReasons = x.result.Reasons
+                })
+                .ToList();
+        }
+
+        // Mirror of FindFoundMatchesAsync for the found -> lost direction.
+        private async Task<List<object>> FindLostMatchesAsync(Found found)
+        {
+            var candidates = context.Losts
+                .Where(l => found.userId == 0 || l.userId != found.userId)
+                .ToList();
+
+            var scored = new List<(Lost item, ItemMatchResult result)>();
+            foreach (var lost in candidates)
+            {
+                var result = await itemSimilarityService.EvaluateLostFoundAsync(lost, found);
+                scored.Add((lost, result));
+            }
+
+            return scored
+                .Where(x => x.result.Score >= ItemSimilarityService.MatchThreshold)
+                .OrderByDescending(x => x.result.Score)
+                .Take(MaxSuggestions)
+                .Select(x => (object)new
+                {
+                    x.item.id,
+                    x.item.itemName,
+                    x.item.category,
+                    x.item.description,
+                    x.item.location,
+                    x.item.brand,
+                    x.item.color,
+                    x.item.imageUrl,
+                    x.item.userName,
+                    x.item.phoneNumber,
+                    x.item.email,
+                    x.item.userId,
+                    matchPercent = Math.Round(x.result.Score * 100, 2),
+                    confidence = x.result.Confidence,
+                    matchReasons = x.result.Reasons
+                })
+                .ToList();
         }
 
         [HttpPost("Register")]
@@ -47,35 +129,7 @@ namespace LostAndFoundApi.Controllers
             context.Losts.Add(lost);
             context.SaveChanges();
 
-            var foundItems = context.Founds.ToList();
-            var scoredMatches = new List<(Found item, double score)>();
-
-            foreach (var found in foundItems)
-            {
-                var score = await itemSimilarityService.CalculateLostFoundScoreAsync(lost, found);
-                scoredMatches.Add((found, score));
-            }
-
-            var suggestedMatches = scoredMatches
-                .Where(x => x.score > 0.15)
-                .OrderByDescending(x => x.score)
-                .Take(5)
-                .Select(x => new
-                {
-                    x.item.id,
-                    x.item.itemName,
-                    x.item.category,
-                    x.item.description,
-                    x.item.location,
-                    x.item.brand,
-                    x.item.color,
-                    x.item.imageUrl,
-                    x.item.userName,
-                    x.item.phoneNumber,
-                    x.item.email,
-                    matchPercent = Math.Round(x.score * 100, 2)
-                })
-                .ToList();
+            var suggestedMatches = await FindFoundMatchesAsync(lost);
 
             return Ok(new
             {
@@ -92,35 +146,7 @@ namespace LostAndFoundApi.Controllers
             context.Founds.Add(found);
             context.SaveChanges();
 
-            var lostItems = context.Losts.ToList();
-            var scoredMatches = new List<(Lost item, double score)>();
-
-            foreach (var lost in lostItems)
-            {
-                var score = await itemSimilarityService.CalculateLostFoundScoreAsync(lost, found);
-                scoredMatches.Add((lost, score));
-            }
-
-            var suggestedMatches = scoredMatches
-                .Where(x => x.score > 0.15)
-                .OrderByDescending(x => x.score)
-                .Take(5)
-                .Select(x => new
-                {
-                    x.item.id,
-                    x.item.itemName,
-                    x.item.category,
-                    x.item.description,
-                    x.item.location,
-                    x.item.brand,
-                    x.item.color,
-                    x.item.imageUrl,
-                    x.item.userName,
-                    x.item.phoneNumber,
-                    x.item.email,
-                    matchPercent = Math.Round(x.score * 100, 2)
-                })
-                .ToList();
+            var suggestedMatches = await FindLostMatchesAsync(found);
 
             return Ok(new
             {
@@ -162,13 +188,66 @@ namespace LostAndFoundApi.Controllers
                 if (item == null) return NotFound("Found item not found.");
                 item.imageUrl = imageUrl;
             }
+            else if (type.ToLower() == "user")
+            {
+                var user = context.Registers.Find(id);
+                if (user == null) return NotFound("User not found.");
+                user.imageUrl = imageUrl;
+            }
+            else
+            {
+                return BadRequest("Invalid type. Must be 'lost', 'found' or 'user'.");
+            }
+
+            context.SaveChanges();
+            return Ok(new { message = "Image uploaded successfully", imageUrl });
+        }
+
+        [HttpDelete("Delete/{type}/{id}")]
+        public ActionResult Delete(string type, int id)
+        {
+            string? imageUrl;
+
+            if (type.ToLower() == "lost")
+            {
+                var item = context.Losts.Find(id);
+                if (item == null) return NotFound("Lost item not found.");
+                imageUrl = item.imageUrl;
+                context.Losts.Remove(item);
+            }
+            else if (type.ToLower() == "found")
+            {
+                var item = context.Founds.Find(id);
+                if (item == null) return NotFound("Found item not found.");
+                imageUrl = item.imageUrl;
+                context.Founds.Remove(item);
+            }
             else
             {
                 return BadRequest("Invalid type. Must be 'lost' or 'found'.");
             }
 
             context.SaveChanges();
-            return Ok(new { message = "Image uploaded successfully", imageUrl });
+            DeleteUploadedFile(imageUrl);
+
+            return Ok(new { message = "Item deleted successfully" });
+        }
+
+        // Removes the physical upload backing an item's imageUrl (e.g. "/uploads/lost/xyz.jpg").
+        private void DeleteUploadedFile(string? imageUrl)
+        {
+            if (string.IsNullOrWhiteSpace(imageUrl) || !imageUrl.StartsWith("/uploads/")) return;
+
+            try
+            {
+                var relativePath = imageUrl.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+                var fullPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", relativePath);
+                if (System.IO.File.Exists(fullPath)) System.IO.File.Delete(fullPath);
+            }
+            catch
+            {
+                // A leftover file is harmless; never fail the delete because of it.
+            }
         }
 
         [HttpGet("GetAllItem")]
@@ -201,7 +280,7 @@ namespace LostAndFoundApi.Controllers
                 if (item == null) return NotFound();
                 return Ok(item);
             }
-            if(type.ToLower() == "found")
+            if (type.ToLower() == "found")
             {
                 var item = context.Founds.FirstOrDefault(x => x.id == id);
                 if (item == null) return NotFound();
@@ -215,9 +294,9 @@ namespace LostAndFoundApi.Controllers
         {
             var lostItems = context.Losts.Where(x => x.userId == id).ToList();
             var foundItems = context.Founds.Where(x => x.userId == id).ToList();
-            
+
             return Ok(new
-            { 
+            {
                 Lost = lostItems,
                 Found = foundItems
             });
@@ -229,35 +308,7 @@ namespace LostAndFoundApi.Controllers
             var lost = context.Losts.FirstOrDefault(x => x.id == lostId);
             if (lost == null) return NotFound("Lost item not found.");
 
-            var foundItems = context.Founds.ToList();
-            var scoredMatches = new List<(Found item, double score)>();
-
-            foreach (var found in foundItems)
-            {
-                var score = await itemSimilarityService.CalculateLostFoundScoreAsync(lost, found);
-                scoredMatches.Add((found, score));
-            }
-
-            var suggestedMatches = scoredMatches
-                .Where(x => x.score > 0.15)
-                .OrderByDescending(x => x.score)
-                .Take(5)
-                .Select(x => new
-                {
-                    x.item.id,
-                    x.item.itemName,
-                    x.item.category,
-                    x.item.description,
-                    x.item.location,
-                    x.item.brand,
-                    x.item.color,
-                    x.item.imageUrl,
-                    x.item.userName,
-                    x.item.phoneNumber,
-                    x.item.email,
-                    matchPercent = Math.Round(x.score * 100, 2)
-                })
-                .ToList();
+            var suggestedMatches = await FindFoundMatchesAsync(lost);
 
             return Ok(new
             {
@@ -272,35 +323,7 @@ namespace LostAndFoundApi.Controllers
             var found = context.Founds.FirstOrDefault(x => x.id == foundId);
             if (found == null) return NotFound("Found item not found.");
 
-            var lostItems = context.Losts.ToList();
-            var scoredMatches = new List<(Lost item, double score)>();
-
-            foreach (var lost in lostItems)
-            {
-                var score = await itemSimilarityService.CalculateLostFoundScoreAsync(lost, found);
-                scoredMatches.Add((lost, score));
-            }
-
-            var suggestedMatches = scoredMatches
-                .Where(x => x.score > 0.15)
-                .OrderByDescending(x => x.score)
-                .Take(5)
-                .Select(x => new
-                {
-                    x.item.id,
-                    x.item.itemName,
-                    x.item.category,
-                    x.item.description,
-                    x.item.location,
-                    x.item.brand,
-                    x.item.color,
-                    x.item.imageUrl,
-                    x.item.userName,
-                    x.item.phoneNumber,
-                    x.item.email,
-                    matchPercent = Math.Round(x.score * 100, 2)
-                })
-                .ToList();
+            var suggestedMatches = await FindLostMatchesAsync(found);
 
             return Ok(new
             {
@@ -308,6 +331,6 @@ namespace LostAndFoundApi.Controllers
                 suggestedMatches
             });
         }
-        
+
     }
 }

@@ -10,5 +10,6 @@ namespace LostAndFoundApi.Models
         public DbSet<Register> Registers { get; set; }
         public DbSet<Lost> Losts { get; set; }
         public DbSet<Found> Founds { get; set; }
+        public DbSet<Message> Messages { get; set; }
     }
 }

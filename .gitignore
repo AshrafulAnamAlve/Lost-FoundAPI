@@ -361,3 +361,32 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# ---------------------------------------------------------------------------
+# ML service (ml_service/) - self-hosted embedding + image model
+# ---------------------------------------------------------------------------
+# ~1.1 GB of dependencies; recreate with `ml_service/start.ps1`.
+ml_service/.venv/
+__pycache__/
+*.pyc
+
+# Trained model weights are large binaries, distributed separately.
+# See ml_service/models/README.md for how to export them from Colab.
+ml_service/models/*.onnx
+ml_service/models/*.h5
+ml_service/models/*.keras
+ml_service/models/*.pt
+ml_service/models/*.pth
+
+# ---------------------------------------------------------------------------
+# Runtime data, not source
+# ---------------------------------------------------------------------------
+# User-uploaded item photos.
+LostAndFoundApi/wwwroot/uploads/
+
+# ---------------------------------------------------------------------------
+# Secrets - appsettings.json is committed, so it must never hold a real key.
+# Use `dotnet user-secrets` or the HuggingFace__ApiKey environment variable.
+# ---------------------------------------------------------------------------
+appsettings.*.local.json
+.env
+*.env

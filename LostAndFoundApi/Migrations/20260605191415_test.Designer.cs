@@ -4,6 +4,7 @@ using LostAndFoundApi.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace LostAndFoundApi.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260605191415_test")]
+    partial class test
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -158,44 +161,6 @@ namespace LostAndFoundApi.Migrations
                     b.ToTable("Losts");
                 });
 
-            modelBuilder.Entity("LostAndFoundApi.Models.Message", b =>
-                {
-                    b.Property<int>("id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
-
-                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("id"));
-
-                    b.Property<string>("content")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<bool>("isRead")
-                        .HasColumnType("bit");
-
-                    b.Property<int?>("itemId")
-                        .HasColumnType("int");
-
-                    b.Property<string>("itemName")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("itemType")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<int>("receiverId")
-                        .HasColumnType("int");
-
-                    b.Property<int>("senderId")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime>("sentAt")
-                        .HasColumnType("datetime2");
-
-                    b.HasKey("id");
-
-                    b.ToTable("Messages");
-                });
-
             modelBuilder.Entity("LostAndFoundApi.Models.Register", b =>
                 {
                     b.Property<int>("id")
@@ -233,9 +198,6 @@ namespace LostAndFoundApi.Migrations
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("SecondaryPhone")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("imageUrl")
                         .HasColumnType("nvarchar(max)");
 
                     b.HasKey("id");

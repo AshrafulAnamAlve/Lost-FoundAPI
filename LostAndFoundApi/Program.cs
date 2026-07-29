@@ -1,3 +1,4 @@
+using LostAndFoundApi.Hubs;
 using LostAndFoundApi.Models;
 using LostAndFoundApi.Services;
 using Microsoft.EntityFrameworkCore;
@@ -17,13 +18,19 @@ builder.Services.AddDbContext<AppDbContext>(option =>
 });
 
 builder.Services.AddHttpClient();
-builder.Services.AddScoped<IItemSimilarityService, ItemSimilarityService>();
+builder.Services.AddSingleton<IItemSimilarityService, ItemSimilarityService>();
+builder.Services.AddSignalR();
 
 builder.Services.AddCors(option =>
 {
     option.AddPolicy("AllowAll", policy =>
     {
-        policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader();
+        // SignalR is cross-origin (UI :4200 -> API :7124) and needs credentials,
+        // so AllowAnyOrigin can't be used together with AllowCredentials.
+        policy.SetIsOriginAllowed(_ => true)
+              .AllowAnyMethod()
+              .AllowAnyHeader()
+              .AllowCredentials();
     });
 });
 
@@ -32,8 +39,8 @@ var app = builder.Build();
 
 // Configure the HTTP request pipeline.
 
-    app.UseSwagger();
-    app.UseSwaggerUI();
+app.UseSwagger();
+app.UseSwaggerUI();
 
 
 app.UseHttpsRedirection();
@@ -42,5 +49,6 @@ app.UseCors("AllowAll");
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapHub<ChatHub>("/chatHub");
 
 app.Run();

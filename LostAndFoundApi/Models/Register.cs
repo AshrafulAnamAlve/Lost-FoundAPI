@@ -14,6 +14,7 @@ namespace LostAndFoundApi.Models
         public string? SecondaryPhone { get; set; }
         public string Address { get; set; }
         public string City { get; set; }
+        public string? imageUrl { get; set; }
 
     }
 }
