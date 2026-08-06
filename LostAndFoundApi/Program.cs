@@ -42,6 +42,10 @@ var app = builder.Build();
 app.UseSwagger();
 app.UseSwaggerUI();
 
+using var serviceScope = app.Services.CreateScope();
+using var dbContext = serviceScope.ServiceProvider.GetService<AppDbContext>();
+dbContext?.Database.Migrate();
+
 
 app.UseHttpsRedirection();
 app.UseStaticFiles();

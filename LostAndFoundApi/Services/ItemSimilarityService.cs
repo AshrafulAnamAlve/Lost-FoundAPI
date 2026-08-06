@@ -43,19 +43,35 @@ namespace LostAndFoundApi.Services
             return status;
         }
 
+        // Reports what scoring would actually use right now. Probes the providers in the
+        // same order the scoring path resolves them, so /api/health cannot claim "rules
+        // only" while matches are in fact being scored with HuggingFace embeddings.
         public async Task<EmbeddingStatus> ProbeEmbeddingServiceAsync(CancellationToken cancellationToken = default)
         {
-            var baseUrl = LocalServiceUrl;
             var wasAvailable = status.Available;
             status.LastAttemptAt = DateTime.UtcNow;
 
-            if (string.IsNullOrWhiteSpace(baseUrl))
+            if (await ProbeLocalServiceAsync(cancellationToken) || await ProbeHuggingFaceAsync(cancellationToken))
             {
-                status.Available = false;
-                status.Provider = "none";
-                status.LastError = "Embedding:ServiceUrl is not configured.";
+                nextRetryAt = DateTime.MinValue;
                 LogAvailabilityTransition(wasAvailable);
                 return GetEmbeddingStatus();
+            }
+
+            status.Available = false;
+            status.Provider = "none";
+            LogAvailabilityTransition(wasAvailable);
+            return GetEmbeddingStatus();
+        }
+
+        private async Task<bool> ProbeLocalServiceAsync(CancellationToken cancellationToken)
+        {
+            var baseUrl = LocalServiceUrl;
+
+            if (string.IsNullOrWhiteSpace(baseUrl))
+            {
+                status.LastError = "Embedding:ServiceUrl is not configured.";
+                return false;
             }
 
             try
@@ -68,11 +84,9 @@ namespace LostAndFoundApi.Services
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    status.Available = false;
-                    status.Provider = "none";
                     status.Endpoint = baseUrl;
                     status.LastError = $"ML service returned {(int)response.StatusCode}.";
-                    return GetEmbeddingStatus();
+                    return false;
                 }
 
                 using var doc = JsonDocument.Parse(body);
@@ -92,18 +106,46 @@ namespace LostAndFoundApi.Services
                     status.Dimensions = dim;
                 }
 
-                if (ready) nextRetryAt = DateTime.MinValue;
+                return ready;
             }
             catch (Exception ex)
             {
-                status.Available = false;
-                status.Provider = "none";
                 status.Endpoint = baseUrl;
                 status.LastError = $"{ex.GetType().Name}: {ex.Message}";
+                return false;
+            }
+        }
+
+        // Costs one metered call, so the result is cached: once HuggingFace has answered
+        // successfully, later health checks reuse that within the cooldown window.
+        private async Task<bool> ProbeHuggingFaceAsync(CancellationToken cancellationToken)
+        {
+            var apiKey = configuration["HuggingFace:ApiKey"];
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                return false;
             }
 
-            LogAvailabilityTransition(wasAvailable);
-            return GetEmbeddingStatus();
+            var model = configuration["HuggingFace:Model"] ?? "sentence-transformers/all-MiniLM-L6-v2";
+
+            if (status.Provider == "huggingface" && status.LastSuccessAt is { } last
+                && DateTime.UtcNow - last < FailureCooldown)
+            {
+                status.Available = true;
+                // The local probe that ran first left its own failure reason behind;
+                // reporting it next to a healthy status would just be confusing.
+                status.LastError = null;
+                return true;
+            }
+
+            var vectors = await GetHuggingFaceEmbeddingsAsync(model, apiKey, new[] { "health probe" }, cancellationToken);
+            if (vectors is not { Count: 1 } || vectors[0].Count == 0)
+            {
+                return false;
+            }
+
+            RecordSuccess("huggingface", HuggingFaceEndpoint(model), vectors[0].Count);
+            return true;
         }
 
         // Logs only on a change of state, so a health-check poll doesn't spam the log.
@@ -182,6 +224,10 @@ namespace LostAndFoundApi.Services
         private const double StrongThreshold = 0.72;
         private const double PossibleThreshold = 0.55;
 
+        // Item-name cosine at or above which two differently-spelled names are treated as
+        // the same kind of object, exempting the pair from the item-name floor gate.
+        private const double ItemNameSemanticFloor = 0.50;
+
         public async Task<ItemMatchResult> EvaluateLostFoundAsync(Lost lost, Found found)
         {
             var score = await ComputeScoreAsync(lost, found);
@@ -206,8 +252,21 @@ namespace LostAndFoundApi.Services
                 ? fieldScore
                 : (fieldScore * 0.70) + (aiScore * 0.30);
 
+            // Cosine between the item names alone (not the full descriptions), or -1.
+            // The item-name gate needs this to tell "different words, same object" from
+            // "different object" — see GateMultiplier.
+            var nameSemantic = await ItemNameSemanticAsync(lost, found);
+
             // Hard gates that veto cross-item false positives (different category, brand, etc.).
-            baseScore *= GateMultiplier(lost, found);
+            var gate = GateMultiplier(lost, found, nameSemantic);
+            baseScore *= gate;
+
+            // One line per comparison, at Debug, so a surprising score can be taken apart
+            // without redeploying: it shows which term actually moved it.
+            logger.LogDebug(
+                "Score {Lost} <-> {Found}: field={Field:F3} ai={Ai:F3} nameSemantic={Name:F3} gate={Gate:F3} final={Final:F3}",
+                lost.itemName, found.itemName, fieldScore, aiScore, nameSemantic, gate,
+                Math.Clamp(baseScore, 0, 1));
 
             return Math.Clamp(baseScore, 0, 1);
         }
@@ -359,7 +418,9 @@ namespace LostAndFoundApi.Services
         // Gates — multipliers that can knock a non-match below the threshold
         // ---------------------------------------------------------------------
 
-        private static double GateMultiplier(Lost lost, Found found)
+        // nameSemantic: cosine similarity between the two item names, or -1 when the
+        // embedding layer is unavailable (in which case gate 3 behaves exactly as before).
+        private static double GateMultiplier(Lost lost, Found found, double nameSemantic = -1)
         {
             double m = 1.0;
 
@@ -384,7 +445,16 @@ namespace LostAndFoundApi.Services
 
             // 3) Item-name floor: don't let two unrelated names slip through on shared
             //    generic words ("black", "small", ...).
-            if (BothHaveText(lost.itemName, found.itemName) && HybridTextScore(lost.itemName, found.itemName) < 0.20)
+            //
+            //    HybridTextScore is spelling-based, so on its own this gate also punishes
+            //    the pairs the semantic layer exists to catch - laptop/notebook,
+            //    wallet/purse - which share no characters but name the same object. It
+            //    runs after fusion, so it would multiply the embedding contribution away.
+            //    Require the names to be semantically distant too before penalising.
+            //    nameSemantic is -1 without embeddings, so the old behaviour is kept.
+            if (BothHaveText(lost.itemName, found.itemName)
+                && HybridTextScore(lost.itemName, found.itemName) < 0.20
+                && nameSemantic < ItemNameSemanticFloor)
             {
                 m *= 0.55;
             }
@@ -460,6 +530,39 @@ namespace LostAndFoundApi.Services
             }
         }
 
+        // Cosine between the two item names on their own, or -1 when embeddings are
+        // unavailable. Deliberately separate from CalculateAiScoreAsync, which embeds the
+        // whole record: a shared category and colour would otherwise drown out the one
+        // signal this gate asks about, which is whether the names denote the same object.
+        // Item names repeat heavily across a catalogue, so the cache absorbs most calls.
+        private async Task<double> ItemNameSemanticAsync(Lost lost, Found found)
+        {
+            if (!BothHaveText(lost.itemName, found.itemName))
+            {
+                return -1;
+            }
+
+            try
+            {
+                // Lower-cased so "Laptop" and "laptop" share one cache entry - the cache is
+                // keyed on the exact string, and item names vary mostly by capitalisation.
+                var pair = await GetEmbeddingPairAsync(
+                    lost.itemName.Trim().ToLowerInvariant(),
+                    found.itemName.Trim().ToLowerInvariant());
+                if (pair is null || pair.Value.Lost.Count == 0 || pair.Value.Found.Count == 0)
+                {
+                    return -1;
+                }
+
+                return CosineSimilarity(pair.Value.Lost, pair.Value.Found);
+            }
+            catch
+            {
+                // The gate simply falls back to its spelling-only behaviour.
+                return -1;
+            }
+        }
+
         // Resolution order: in-process cache -> self-hosted ML service -> HuggingFace.
         // The two texts are fetched in ONE round trip, not two.
         private async Task<(List<double> Lost, List<double> Found)?> GetEmbeddingPairAsync(string lostText, string foundText)
@@ -494,20 +597,21 @@ namespace LostAndFoundApi.Services
                 }
             }
 
-            // 2) HuggingFace hosted API — legacy fallback, kept so an existing
-            //    configuration keeps working. Note the public inference endpoint this
-            //    targets has been decommissioned; prefer the local service.
+            // 2) HuggingFace Inference Providers. This is the path that runs when the
+            //    API is hosted but the self-hosted service is not reachable from it —
+            //    same model as the local service, so scores stay comparable.
             var apiKey = configuration["HuggingFace:ApiKey"];
             if (!string.IsNullOrWhiteSpace(apiKey))
             {
                 var model = configuration["HuggingFace:Model"] ?? "sentence-transformers/all-MiniLM-L6-v2";
-                var hfLost = await GetEmbeddingAsync(model, apiKey, lostText);
-                var hfFound = await GetEmbeddingAsync(model, apiKey, foundText);
+                var vectors = await GetHuggingFaceEmbeddingsAsync(model, apiKey, new[] { lostText, foundText });
 
-                if (hfLost.Count > 0 && hfFound.Count > 0)
+                if (vectors is { Count: 2 } && vectors[0].Count > 0 && vectors[1].Count > 0)
                 {
-                    RecordSuccess("huggingface", "api-inference.huggingface.co", hfLost.Count);
-                    return (hfLost, hfFound);
+                    embeddingCache[lostText] = vectors[0];
+                    embeddingCache[foundText] = vectors[1];
+                    RecordSuccess("huggingface", HuggingFaceEndpoint(model), vectors[0].Count);
+                    return (vectors[0], vectors[1]);
                 }
             }
 
@@ -608,49 +712,73 @@ namespace LostAndFoundApi.Services
             return (cosine - floor) / (ceil - floor);
         }
 
-        private async Task<List<double>> GetEmbeddingAsync(string model, string apiKey, string text)
+        // api-inference.huggingface.co was retired by HuggingFace - it no longer even
+        // resolves - and was replaced by the Inference Providers router.
+        private static string HuggingFaceEndpoint(string model) =>
+            $"https://router.huggingface.co/hf-inference/models/{model}/pipeline/feature-extraction";
+
+        // POST { inputs: [textA, textB] } -> [[...], [...]]
+        // Both texts go in one request: this path is metered per call, and a scoring
+        // pass compares the same lost item against every candidate.
+        private async Task<List<List<double>>?> GetHuggingFaceEmbeddingsAsync(
+            string model, string apiKey, string[] texts, CancellationToken cancellationToken = default)
         {
-            if (embeddingCache.TryGetValue(text, out var cached))
+            try
             {
-                return cached;
-            }
+                var client = httpClientFactory.CreateClient();
+                client.Timeout = TimeSpan.FromSeconds(20);
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
-            var client = httpClientFactory.CreateClient();
-            client.Timeout = TimeSpan.FromSeconds(20);
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-
-            var requestBody = new
-            {
-                inputs = text,
-                options = new
+                var payload = JsonSerializer.Serialize(new
                 {
-                    wait_for_model = true
+                    inputs = texts,
+                    options = new { wait_for_model = true }
+                });
+
+                using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+                using var response = await client.PostAsync(HuggingFaceEndpoint(model), content, cancellationToken);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                    status.LastError = $"HuggingFace returned {(int)response.StatusCode}: {Truncate(body, 200)}";
+                    return null;
                 }
-            };
 
-            var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-            var endpoint = $"https://api-inference.huggingface.co/pipeline/feature-extraction/{model}";
+                var json = await response.Content.ReadAsStringAsync(cancellationToken);
+                using var doc = JsonDocument.Parse(json);
 
-            using var response = await client.PostAsync(endpoint, content);
-            if (!response.IsSuccessStatusCode)
-            {
-                return new List<double>();
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                {
+                    status.LastError = "HuggingFace response was not an array of vectors.";
+                    return null;
+                }
+
+                var result = new List<List<double>>();
+                foreach (var row in doc.RootElement.EnumerateArray())
+                {
+                    var vector = new List<double>();
+                    ExtractNumbers(row, vector);
+                    result.Add(vector);
+                }
+
+                if (result.Count != texts.Length)
+                {
+                    status.LastError = $"HuggingFace returned {result.Count} vectors for {texts.Length} texts.";
+                    return null;
+                }
+
+                return result;
             }
-
-            var jsonString = await response.Content.ReadAsStringAsync();
-            using var doc = JsonDocument.Parse(jsonString);
-
-            var numbers = new List<double>();
-            ExtractNumbers(doc.RootElement, numbers);
-
-            if (numbers.Count == 0)
+            catch (Exception ex)
             {
-                return numbers;
+                status.LastError = $"{ex.GetType().Name}: {ex.Message}";
+                return null;
             }
-
-            embeddingCache[text] = numbers;
-            return numbers;
         }
+
+        private static string Truncate(string value, int max) =>
+            string.IsNullOrEmpty(value) || value.Length <= max ? value : value[..max];
 
         private static void ExtractNumbers(JsonElement element, List<double> target)
         {
