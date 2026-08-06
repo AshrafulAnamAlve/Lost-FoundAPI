@@ -14,11 +14,19 @@ namespace LostAndFoundApi.Controllers
     {
         private readonly AppDbContext context;
         private readonly IItemSimilarityService itemSimilarityService;
+        private readonly IConfiguration configuration;
+        private readonly IHostEnvironment hostEnvironment;
 
-        public HealthController(AppDbContext context, IItemSimilarityService itemSimilarityService)
+        public HealthController(
+            AppDbContext context,
+            IItemSimilarityService itemSimilarityService,
+            IConfiguration configuration,
+            IHostEnvironment hostEnvironment)
         {
             this.context = context;
             this.itemSimilarityService = itemSimilarityService;
+            this.configuration = configuration;
+            this.hostEnvironment = hostEnvironment;
         }
 
         [HttpGet]
@@ -37,6 +45,7 @@ namespace LostAndFoundApi.Controllers
                 status,
                 checkedAt = DateTime.UtcNow,
                 build = BuildInfo(),
+                config = ConfigInfo(),
                 database = new { ok = database.ok, error = database.error },
                 matching = new
                 {
@@ -51,6 +60,25 @@ namespace LostAndFoundApi.Controllers
                     lastError = embedding.LastError
                 }
             });
+        }
+
+        // Whether configuration arrived, never what it contains. "The key is missing"
+        // and "the key is present but rejected" need different fixes, and on a host
+        // where you cannot read the process environment there is otherwise no way to
+        // tell them apart. environmentName matters because appsettings.{Environment}.json
+        // is only loaded for the matching name.
+        private object ConfigInfo()
+        {
+            var key = configuration["HuggingFace:ApiKey"];
+
+            return new
+            {
+                environmentName = hostEnvironment.EnvironmentName,
+                huggingFaceKeyConfigured = !string.IsNullOrWhiteSpace(key),
+                huggingFaceKeyLength = key?.Length ?? 0,
+                embeddingServiceUrl = configuration["Embedding:ServiceUrl"],
+                itemNameSemanticFloor = configuration["Matching:ItemNameSemanticFloor"] ?? "(default)",
+            };
         }
 
         // Which build is actually serving. Without this there is no way to tell a
