@@ -226,7 +226,22 @@ namespace LostAndFoundApi.Services
 
         // Item-name cosine at or above which two differently-spelled names are treated as
         // the same kind of object, exempting the pair from the item-name floor gate.
-        private const double ItemNameSemanticFloor = 0.50;
+        // A hyperparameter, so it is configurable (Matching:ItemNameSemanticFloor) rather
+        // than compiled in - it should be set by a sweep over labelled pairs, and that
+        // sweep should not require a redeploy to act on.
+        //
+        // 0.35 comes from a sweep over nine real lost/found pairs (three laptops, three
+        // phones, three watches, each posted twice in different wording): 0.40 and above
+        // scored 6/9, while everything in [0.25, 0.35] scored 9/9, with no false
+        // positives at any setting. The gap is clean - on that set the best-scoring
+        // non-matching pair reached 0.292 and the worst true pair 0.352 - but nine pairs
+        // is not a benchmark, so this wants re-sweeping on the labelled set.
+        private const double DefaultItemNameSemanticFloor = 0.35;
+
+        private double ItemNameSemanticFloor =>
+            double.TryParse(configuration["Matching:ItemNameSemanticFloor"], out var v)
+                ? v
+                : DefaultItemNameSemanticFloor;
 
         public async Task<ItemMatchResult> EvaluateLostFoundAsync(Lost lost, Found found)
         {
@@ -420,7 +435,7 @@ namespace LostAndFoundApi.Services
 
         // nameSemantic: cosine similarity between the two item names, or -1 when the
         // embedding layer is unavailable (in which case gate 3 behaves exactly as before).
-        private static double GateMultiplier(Lost lost, Found found, double nameSemantic = -1)
+        private double GateMultiplier(Lost lost, Found found, double nameSemantic = -1)
         {
             double m = 1.0;
 
