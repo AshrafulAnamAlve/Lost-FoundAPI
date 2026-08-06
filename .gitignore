@@ -390,3 +390,8 @@ LostAndFoundApi/wwwroot/uploads/
 appsettings.*.local.json
 .env
 *.env
+
+# Holds the live HuggingFace key. Deliberately NOT committed, but it IS picked up
+# by `dotnet publish`, so Visual Studio carries it to the host on every publish
+# without the key ever entering git history.
+appsettings.Production.json
