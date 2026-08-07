@@ -238,6 +238,10 @@ namespace LostAndFoundApi.Services
         // is not a benchmark, so this wants re-sweeping on the labelled set.
         private const double DefaultItemNameSemanticFloor = 0.35;
 
+        // BuildReasons is static and only needs the default to word a chip; the
+        // configurable value drives scoring, where it actually changes outcomes.
+        private const double ItemNameSemanticFloorStatic = DefaultItemNameSemanticFloor;
+
         private double ItemNameSemanticFloor =>
             double.TryParse(configuration["Matching:ItemNameSemanticFloor"], out var v)
                 ? v
@@ -245,17 +249,21 @@ namespace LostAndFoundApi.Services
 
         public async Task<ItemMatchResult> EvaluateLostFoundAsync(Lost lost, Found found)
         {
-            var score = await ComputeScoreAsync(lost, found);
+            // The item-name cosine is computed once and shared: the score uses it to
+            // decide the gate, and the reasons use it so the explanation cannot claim
+            // the names differ on a pair the semantic layer just matched.
+            var nameSemantic = await ItemNameSemanticAsync(lost, found);
+            var score = await ComputeScoreAsync(lost, found, nameSemantic);
 
             return new ItemMatchResult
             {
                 Score = score,
                 Confidence = ConfidenceOf(score),
-                Reasons = BuildReasons(lost, found)
+                Reasons = BuildReasons(lost, found, nameSemantic)
             };
         }
 
-        private async Task<double> ComputeScoreAsync(Lost lost, Found found)
+        private async Task<double> ComputeScoreAsync(Lost lost, Found found, double nameSemantic)
         {
             // Priority-weighted similarity across the structured fields.
             var fieldScore = CalculateFieldScore(lost, found);
@@ -266,11 +274,6 @@ namespace LostAndFoundApi.Services
             var baseScore = aiScore < 0
                 ? fieldScore
                 : (fieldScore * 0.70) + (aiScore * 0.30);
-
-            // Cosine between the item names alone (not the full descriptions), or -1.
-            // The item-name gate needs this to tell "different words, same object" from
-            // "different object" — see GateMultiplier.
-            var nameSemantic = await ItemNameSemanticAsync(lost, found);
 
             // Hard gates that veto cross-item false positives (different category, brand, etc.).
             var gate = GateMultiplier(lost, found, nameSemantic);
@@ -291,21 +294,29 @@ namespace LostAndFoundApi.Services
              : score >= PossibleThreshold ? "Possible"
              : "Weak";
 
-        // Re-derives the per-field signals as short, human-readable reasons. The numbers
-        // mirror CalculateFieldScore so the explanation always agrees with the score.
-        private static List<MatchReason> BuildReasons(Lost lost, Found found)
+        // Re-derives the per-field signals as short, human-readable reasons.
+        //
+        // These must call exactly the comparisons CalculateFieldScore and GateMultiplier
+        // call. When they drifted apart the UI contradicted the engine - a pair could be
+        // matched on an item name the semantic layer recognised while the chip beside it
+        // still read "Different item name", which reads as the AI not working at all.
+        //
+        // nameSemantic is the item-name cosine, or -1 without embeddings.
+        private static List<MatchReason> BuildReasons(Lost lost, Found found, double nameSemantic = -1)
         {
             var reasons = new List<MatchReason>();
 
             void Reason(string field, string label, string status, string? detail = null)
                 => reasons.Add(new MatchReason { Field = field, Label = label, Status = status, Detail = detail });
 
-            // What the item is — the headline signal.
+            // What the item is — the headline signal. Spelling first, then the semantic
+            // layer, which is what lets "Laptop" and "Notebook computer" agree.
             if (BothHaveText(lost.itemName, found.itemName))
             {
                 var s = HybridTextScore(lost.itemName, found.itemName);
                 if (s >= 0.70) Reason("itemName", "Same item", "match", found.itemName);
-                else if (s >= 0.35) Reason("itemName", "Similar item name", "partial");
+                else if (nameSemantic >= 0.60) Reason("itemName", "Same kind of item", "match", found.itemName);
+                else if (s >= 0.35 || nameSemantic >= ItemNameSemanticFloorStatic) Reason("itemName", "Similar item name", "partial");
                 else Reason("itemName", "Different item name", "mismatch");
             }
 
@@ -320,19 +331,22 @@ namespace LostAndFoundApi.Services
                 }
             }
 
-            // Brand / model.
+            // Brand / model. BrandScore treats "Samsung" and "Samsung Tab" as the same
+            // maker, so the chip has to agree rather than call it a mismatch.
             if (BothHaveText(lost.brand, found.brand))
             {
-                var s = HybridTextScore(lost.brand, found.brand);
-                if (s >= 0.70) Reason("brand", "Brand matches", "match", found.brand);
+                var s = BrandScore(lost.brand, found.brand);
+                if (s >= 0.99) Reason("brand", "Brand matches", "match", found.brand);
+                else if (s >= 0.70) Reason("brand", "Same brand, different model", "partial", found.brand);
                 else Reason("brand", "Different brand", "mismatch");
             }
 
             // Colour.
             if (BothHaveText(lost.color, found.color))
             {
-                var s = HybridTextScore(lost.color, found.color);
-                if (s >= 0.60) Reason("color", "Same colour", "match", found.color);
+                var s = ColourScore(lost.color, found.color);
+                if (s >= 0.99) Reason("color", "Same colour", "match", found.color);
+                else if (s >= 0.45) Reason("color", "Similar colour", "partial", found.color);
                 else Reason("color", "Colour differs", "mismatch");
             }
 
@@ -385,13 +399,13 @@ namespace LostAndFoundApi.Services
             Add(0.15, CategoryScore(lost.category, found.category), BothHaveText(lost.category, found.category));
 
             // brand/model is decisive for electronics; only counted when both sides provide it.
-            Add(0.15, HybridTextScore(lost.brand, found.brand), BothHaveText(lost.brand, found.brand));
+            Add(0.15, BrandScore(lost.brand, found.brand), BothHaveText(lost.brand, found.brand));
 
             // free-text description.
             Add(0.12, HybridTextScore(lost.description, found.description), BothHaveText(lost.description, found.description));
 
             // colour.
-            Add(0.10, HybridTextScore(lost.color, found.color), BothHaveText(lost.color, found.color));
+            Add(0.10, ColourScore(lost.color, found.color), BothHaveText(lost.color, found.color));
 
             // location overlap.
             Add(0.08, JaccardSimilarity(Tokenize(lost.location), Tokenize(found.location)), BothHaveText(lost.location, found.location));
@@ -453,7 +467,7 @@ namespace LostAndFoundApi.Services
 
             // 2) For items that DO share a category, a clearly different brand almost
             //    always means a different physical item (iPhone vs Galaxy).
-            if (BothHaveText(lost.brand, found.brand) && HybridTextScore(lost.brand, found.brand) < 0.34)
+            if (BothHaveText(lost.brand, found.brand) && BrandScore(lost.brand, found.brand) < 0.34)
             {
                 m *= 0.70;
             }
@@ -930,6 +944,99 @@ namespace LostAndFoundApi.Services
         private static string BuildFoundText(Found found)
         {
             return $"{found.itemName} {found.category} {found.description} {found.location} {found.brand} {found.color}";
+        }
+
+        // ---------------------------------------------------------------------
+        // Field comparisons that spelling alone gets wrong
+        // ---------------------------------------------------------------------
+
+        // Colour words people actually use for the same colour. Deliberately a lookup
+        // and NOT the embedding model: measured on all-MiniLM-L6-v2, "black" and "white"
+        // score 0.759 while "blue" and "navy" score 0.343 - the model encodes "these are
+        // both colour words", which is the opposite of what this comparison needs.
+        private static readonly Dictionary<string, string> ColourFamilies = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["black"] = "black",   ["dark"] = "black",    ["charcoal"] = "black",
+            ["jet"] = "black",     ["matte black"] = "black", ["space grey"] = "black",
+            ["space gray"] = "black",
+
+            ["white"] = "white",   ["ivory"] = "white",   ["cream"] = "white",
+            ["off white"] = "white", ["pearl"] = "white",
+
+            ["grey"] = "grey",     ["gray"] = "grey",     ["silver"] = "grey",
+            ["ash"] = "grey",      ["graphite"] = "grey", ["titanium"] = "grey",
+
+            ["blue"] = "blue",     ["navy"] = "blue",     ["sky blue"] = "blue",
+            ["teal"] = "blue",     ["cyan"] = "blue",     ["midnight"] = "blue",
+
+            ["red"] = "red",       ["maroon"] = "red",    ["crimson"] = "red",
+            ["burgundy"] = "red",  ["scarlet"] = "red",
+
+            ["green"] = "green",   ["olive"] = "green",   ["mint"] = "green",
+            ["emerald"] = "green",
+
+            ["gold"] = "gold",     ["golden"] = "gold",   ["champagne"] = "gold",
+            ["rose gold"] = "gold", ["bronze"] = "gold",  ["copper"] = "gold",
+
+            ["brown"] = "brown",   ["tan"] = "brown",     ["beige"] = "brown",
+            ["coffee"] = "brown",  ["chocolate"] = "brown",
+
+            ["pink"] = "pink",     ["rose"] = "pink",     ["magenta"] = "pink",
+            ["purple"] = "purple", ["violet"] = "purple", ["lavender"] = "purple",
+            ["yellow"] = "yellow", ["mustard"] = "yellow",
+            ["orange"] = "orange",
+        };
+
+        // Colours that a phone in a photo could plausibly be described as either of.
+        private static readonly HashSet<string> GreyAdjacent = new(StringComparer.OrdinalIgnoreCase)
+        { "black", "grey" };
+
+        // 1.0 same colour family, 0.5 for the black/grey pair people genuinely disagree
+        // about, otherwise fall back to spelling so unknown words still compare.
+        private static double ColourScore(string? left, string? right)
+        {
+            var a = ColourFamilyOf(left);
+            var b = ColourFamilyOf(right);
+
+            if (a is null || b is null) return HybridTextScore(left, right);
+            if (a == b) return 1.0;
+            if (GreyAdjacent.Contains(a) && GreyAdjacent.Contains(b)) return 0.5;
+            return 0.0;
+        }
+
+        // "dark gray" is two tokens; try the whole phrase first, then any token that is
+        // a known colour, so "matte black finish" still resolves to black.
+        private static string? ColourFamilyOf(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+
+            var normalised = value.Trim().ToLowerInvariant();
+            if (ColourFamilies.TryGetValue(normalised, out var whole)) return whole;
+
+            foreach (var token in normalised.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (ColourFamilies.TryGetValue(token, out var part)) return part;
+            }
+
+            return null;
+        }
+
+        // Brand fields get filled in inconsistently: one person writes "Samsung", the
+        // other "Samsung Tab" or "Samsung Galaxy Tab". When one side's tokens are a
+        // subset of the other's it is the same brand with a model name attached, which
+        // spelling similarity scores as a partial mismatch.
+        private static double BrandScore(string? left, string? right)
+        {
+            var a = Tokenize(left);
+            var b = Tokenize(right);
+
+            if (a.Count == 0 || b.Count == 0) return HybridTextScore(left, right);
+            if (a.SetEquals(b)) return 1.0;
+            if (a.IsSubsetOf(b) || b.IsSubsetOf(a)) return 1.0;
+
+            // Partial overlap ("Samsung Galaxy" vs "Samsung Note") still indicates the
+            // same maker; leave anything with no shared token to spelling.
+            return a.Overlaps(b) ? 0.85 : HybridTextScore(left, right);
         }
 
         // ---------------------------------------------------------------------
