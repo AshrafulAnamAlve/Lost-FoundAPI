@@ -545,6 +545,91 @@ namespace LostAndFoundApi.Services
             }
         }
 
+        // A scoring pass compares one item against every candidate, and each pair needs
+        // two vectors: the whole record, and the item name on its own. Fetched lazily
+        // that is one network round trip per candidate, in series - seconds of latency
+        // on a hosted provider, paid by the user waiting on a submit. Every text the
+        // pass will ask for is known up front, so fetch them all now, batched.
+        public Task PrimeAsync(Lost lost, IEnumerable<Found> candidates, CancellationToken cancellationToken = default)
+            => PrimeTextsAsync(
+                new[] { BuildLostText(lost), NameKey(lost.itemName) }
+                    .Concat(candidates.SelectMany(c => new[] { BuildFoundText(c), NameKey(c.itemName) })),
+                cancellationToken);
+
+        public Task PrimeAsync(Found found, IEnumerable<Lost> candidates, CancellationToken cancellationToken = default)
+            => PrimeTextsAsync(
+                new[] { BuildFoundText(found), NameKey(found.itemName) }
+                    .Concat(candidates.SelectMany(c => new[] { BuildLostText(c), NameKey(c.itemName) })),
+                cancellationToken);
+
+        // Providers cap how much they accept per request, so send in chunks. A failure
+        // is not fatal: scoring falls back to fetching pairs lazily, or to rules only.
+        private const int PrimeBatchSize = 24;
+
+        private async Task PrimeTextsAsync(IEnumerable<string> texts, CancellationToken cancellationToken)
+        {
+            var pending = texts
+                .Where(t => !string.IsNullOrWhiteSpace(t) && !embeddingCache.ContainsKey(t))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (pending.Count == 0 || DateTime.UtcNow < nextRetryAt)
+            {
+                return;
+            }
+
+            for (var offset = 0; offset < pending.Count; offset += PrimeBatchSize)
+            {
+                var batch = pending.Skip(offset).Take(PrimeBatchSize).ToArray();
+                var vectors = await GetEmbeddingsAsync(batch, cancellationToken);
+
+                if (vectors is null || vectors.Count != batch.Length)
+                {
+                    return;
+                }
+
+                for (var i = 0; i < batch.Length; i++)
+                {
+                    if (vectors[i].Count > 0) embeddingCache[batch[i]] = vectors[i];
+                }
+            }
+        }
+
+        // Resolves a batch of texts through whichever provider is available.
+        private async Task<List<List<double>>?> GetEmbeddingsAsync(string[] texts, CancellationToken cancellationToken)
+        {
+            var baseUrl = LocalServiceUrl;
+            if (!string.IsNullOrWhiteSpace(baseUrl))
+            {
+                var local = await GetLocalEmbeddingsAsync(baseUrl, texts);
+                if (local is not null && local.Count == texts.Length)
+                {
+                    RecordSuccess("local", baseUrl, local[0].Count);
+                    return local;
+                }
+            }
+
+            var apiKey = configuration["HuggingFace:ApiKey"];
+            if (!string.IsNullOrWhiteSpace(apiKey))
+            {
+                var model = configuration["HuggingFace:Model"] ?? "sentence-transformers/all-MiniLM-L6-v2";
+                var hf = await GetHuggingFaceEmbeddingsAsync(model, apiKey, texts, cancellationToken);
+                if (hf is not null && hf.Count == texts.Length)
+                {
+                    RecordSuccess("huggingface", HuggingFaceEndpoint(model), hf[0].Count);
+                    return hf;
+                }
+            }
+
+            RecordFailure(status.LastError ?? "No embedding provider is reachable.");
+            return null;
+        }
+
+        // The cache key for an item name. Must match what ItemNameSemanticAsync looks up,
+        // or priming silently misses and the lazy path pays for it anyway.
+        private static string NameKey(string? itemName) =>
+            string.IsNullOrWhiteSpace(itemName) ? string.Empty : itemName.Trim().ToLowerInvariant();
+
         // Cosine between the two item names on their own, or -1 when embeddings are
         // unavailable. Deliberately separate from CalculateAiScoreAsync, which embeds the
         // whole record: a shared category and colour would otherwise drown out the one
@@ -559,11 +644,7 @@ namespace LostAndFoundApi.Services
 
             try
             {
-                // Lower-cased so "Laptop" and "laptop" share one cache entry - the cache is
-                // keyed on the exact string, and item names vary mostly by capitalisation.
-                var pair = await GetEmbeddingPairAsync(
-                    lost.itemName.Trim().ToLowerInvariant(),
-                    found.itemName.Trim().ToLowerInvariant());
+                var pair = await GetEmbeddingPairAsync(NameKey(lost.itemName), NameKey(found.itemName));
                 if (pair is null || pair.Value.Lost.Count == 0 || pair.Value.Found.Count == 0)
                 {
                     return -1;

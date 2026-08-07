@@ -30,6 +30,11 @@ namespace LostAndFoundApi.Controllers
                 .Where(f => lost.userId == 0 || f.userId != lost.userId)
                 .ToList();
 
+            // Fetch every embedding this pass needs in one batch. Without it the loop
+            // below makes a network round trip per candidate, in series, and the user
+            // waits through all of them.
+            await itemSimilarityService.PrimeAsync(lost, candidates);
+
             var scored = new List<(Found item, ItemMatchResult result)>();
             foreach (var found in candidates)
             {
@@ -68,6 +73,8 @@ namespace LostAndFoundApi.Controllers
             var candidates = context.Losts
                 .Where(l => found.userId == 0 || l.userId != found.userId)
                 .ToList();
+
+            await itemSimilarityService.PrimeAsync(found, candidates);
 
             var scored = new List<(Lost item, ItemMatchResult result)>();
             foreach (var lost in candidates)

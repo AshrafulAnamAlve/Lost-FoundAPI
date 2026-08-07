@@ -15,5 +15,13 @@ namespace LostAndFoundApi.Services
         // Actively contacts the embedding service and refreshes the status.
         // Used by /api/health so an outage surfaces before a user notices it.
         Task<EmbeddingStatus> ProbeEmbeddingServiceAsync(CancellationToken cancellationToken = default);
+
+        // Embeds everything a scoring pass will need, in as few round trips as possible.
+        // Call before evaluating one item against a list of candidates: without it each
+        // pair fetches its own embeddings and the pass costs one network round trip per
+        // candidate, in series.
+        Task PrimeAsync(Lost lost, IEnumerable<Found> candidates, CancellationToken cancellationToken = default);
+
+        Task PrimeAsync(Found found, IEnumerable<Lost> candidates, CancellationToken cancellationToken = default);
     }
 }
