@@ -14,17 +14,20 @@ namespace LostAndFoundApi.Controllers
     {
         private readonly AppDbContext context;
         private readonly IItemSimilarityService itemSimilarityService;
+        private readonly IItemClassificationService itemClassificationService;
         private readonly IConfiguration configuration;
         private readonly IHostEnvironment hostEnvironment;
 
         public HealthController(
             AppDbContext context,
             IItemSimilarityService itemSimilarityService,
+            IItemClassificationService itemClassificationService,
             IConfiguration configuration,
             IHostEnvironment hostEnvironment)
         {
             this.context = context;
             this.itemSimilarityService = itemSimilarityService;
+            this.itemClassificationService = itemClassificationService;
             this.configuration = configuration;
             this.hostEnvironment = hostEnvironment;
         }
@@ -34,6 +37,12 @@ namespace LostAndFoundApi.Controllers
         {
             var database = await CheckDatabaseAsync(cancellationToken);
             var embedding = await itemSimilarityService.ProbeEmbeddingServiceAsync(cancellationToken);
+
+            // Loads the ONNX session on the first call if it has not been used yet,
+            // which is the point: it turns "the model is on the host and parses" into
+            // something you can check from a browser instead of inferring it from
+            // whether a posted item happened to come back with a category.
+            var classifier = itemClassificationService.Describe();
 
             // "degraded" = still fully usable, just matching on rules alone.
             var status = !database.ok ? "unhealthy"
@@ -58,6 +67,19 @@ namespace LostAndFoundApi.Controllers
                     lastSuccessAt = embedding.LastSuccessAt,
                     lastAttemptAt = embedding.LastAttemptAt,
                     lastError = embedding.LastError
+                },
+                // Never folded into `status`: an item posts perfectly well without a
+                // detected category, so a missing classifier is not a degradation of
+                // the service, only of one enrichment.
+                classifier = new
+                {
+                    provider = classifier.Provider,
+                    configured = classifier.Configured,
+                    ready = classifier.Ready,
+                    source = classifier.Source,
+                    classes = classifier.Classes,
+                    threshold = classifier.Threshold,
+                    error = classifier.Error
                 }
             });
         }

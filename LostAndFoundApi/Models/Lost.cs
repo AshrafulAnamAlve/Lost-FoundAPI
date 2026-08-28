@@ -23,5 +23,16 @@ namespace LostAndFoundApi.Models
         public int userId { get;set; }
         public string? imageUrl { get; set; }
 
+        // What the image classifier made of the photo, as an app category
+        // ("laptop", "phone", ...). Kept separate from `category` above, which is
+        // the user's own choice: that one drives a hard gate in the matching engine
+        // (a cross-category pair is multiplied by 0.20), and a model that is right
+        // ~88% of the time must never be able to veto a real match. Null when there
+        // is no photo, the classifier was unavailable, or it was not confident.
+        public string? detectedCategory { get; set; }
+
+        // Confidence behind detectedCategory, 0..1. Stored so a low-confidence
+        // guess can be told apart from a certain one after the fact.
+        public double? detectedConfidence { get; set; }
     }
 }

@@ -211,9 +211,15 @@ namespace LostAndFoundApi.Services
         // Categories that are close enough that one user might pick either for the same
         // real-world item (e.g. a phone filed under "electronics"). Members of the same
         // group are treated as "related" rather than a hard mismatch.
+        // "calculator" is in here for a compatibility reason as much as a semantic
+        // one: it only became its own dropdown option once the image classifier
+        // gained a class for it, and every calculator posted before that sits under
+        // "electronics". Without this the two would be a hard category mismatch and
+        // gate 1 would multiply a genuine match by 0.20.
         private static readonly List<HashSet<string>> RelatedCategoryGroups = new()
         {
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "phone", "laptop", "electronics" }
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { "phone", "laptop", "electronics", "calculator" }
         };
 
         // A match must clear this combined score to be surfaced. Kept here so the controller
@@ -246,6 +252,16 @@ namespace LostAndFoundApi.Services
             double.TryParse(configuration["Matching:ItemNameSemanticFloor"], out var v)
                 ? v
                 : DefaultItemNameSemanticFloor;
+
+        // Multiplier applied when the image classifier disagrees about what the two
+        // items are. Deliberately gentle - see the gate itself for why - and
+        // configurable so it can be tuned against labelled pairs without a redeploy.
+        private const double DefaultDetectedCategoryPenalty = 0.92;
+
+        private double DetectedCategoryPenalty =>
+            double.TryParse(configuration["Matching:DetectedCategoryPenalty"], out var v)
+                ? v
+                : DefaultDetectedCategoryPenalty;
 
         public async Task<ItemMatchResult> EvaluateLostFoundAsync(Lost lost, Found found)
         {
@@ -329,6 +345,15 @@ namespace LostAndFoundApi.Services
                     case CategoryRelation.Related: Reason("category", "Related category", "partial", found.category); break;
                     default: Reason("category", "Different category", "mismatch"); break;
                 }
+            }
+
+            // Surfaced only when it actually moved the score (gate 4). Silent
+            // agreement needs no chip, and a chip for a signal the engine ignored
+            // would be the same drift this method exists to avoid.
+            if (DetectedCategoriesConflict(lost, found))
+            {
+                Reason("detectedCategory", "Photos look like different items", "partial",
+                    $"{lost.detectedCategory} vs {found.detectedCategory}");
             }
 
             // Brand / model. BrandScore treats "Samsung" and "Samsung Tab" as the same
@@ -488,7 +513,53 @@ namespace LostAndFoundApi.Services
                 m *= 0.55;
             }
 
+            // 4) The image classifier disagrees about what the two photos show.
+            //
+            //    A nudge, not a veto. The model is right about 88% of the time, so
+            //    roughly one comparison in eight carries a wrong label; at 0.20 (what
+            //    gate 1 does to a user-declared category mismatch) a single
+            //    misclassification would bury a genuine match. At 0.92 it reorders
+            //    near-ties and leaves strong matches strong, which is all a signal
+            //    this noisy has earned.
+            if (DetectedCategoriesConflict(lost, found))
+            {
+                m *= DetectedCategoryPenalty;
+            }
+
             return m;
+        }
+
+        // True when the classifier confidently saw two different kinds of object.
+        //
+        // Three conditions, all required, because each guards a different failure:
+        //
+        //  * Both sides must have a stored detection. Only confident predictions are
+        //    stored (see ClassifyUploadAsync), so a photo the model was unsure about
+        //    never reaches here, and an item with no photo at all never penalises one
+        //    that has one.
+        //
+        //  * Both users must have filed the item under a category the model was
+        //    trained on. It knows four kinds of object but the form offers ten, and
+        //    it cannot answer "none of these" - a wallet photo still comes back as
+        //    one of the four, often confidently. Its opinion is only admissible where
+        //    it had a chance of being right.
+        //
+        //  * The two detections must actually differ.
+        private static bool DetectedCategoriesConflict(Lost lost, Found found)
+        {
+            if (!BothHaveText(lost.detectedCategory, found.detectedCategory)) return false;
+            if (!BothHaveText(lost.category, found.category)) return false;
+
+            if (!ItemClassificationService.ModelCoveredCategories.Contains(NormalizeCategory(lost.category))
+                || !ItemClassificationService.ModelCoveredCategories.Contains(NormalizeCategory(found.category)))
+            {
+                return false;
+            }
+
+            return !string.Equals(
+                NormalizeCategory(lost.detectedCategory),
+                NormalizeCategory(found.detectedCategory),
+                StringComparison.OrdinalIgnoreCase);
         }
 
         private enum CategoryRelation { Same, Related, Different }

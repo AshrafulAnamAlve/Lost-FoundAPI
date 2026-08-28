@@ -19,6 +19,34 @@ builder.Services.AddDbContext<AppDbContext>(option =>
 
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IItemSimilarityService, ItemSimilarityService>();
+// Two ways to run the same image model, picked once at startup.
+//
+// "onnx"    - load MLModels/model.onnx into this process (no Python, ships with
+//             the publish, works on the .NET-only host the API actually lives on).
+// "service" - POST it to /ml_service, the Python app. Right when the model is
+//             hosted somewhere with more memory than shared hosting has.
+// "auto"    - the default: prefer in-process when the model file is there, and
+//             fall back to the HTTP service when it is not.
+//
+// Auto resolves the same way in development and production, so what is tested
+// locally is what runs live. Both are singletons: each holds something expensive
+// (an ONNX session / an HttpClient factory handle) that is meant to be shared.
+builder.Services.AddSingleton<IItemClassificationService>(provider =>
+{
+    var mode = builder.Configuration["ImageClassification:Provider"];
+
+    IItemClassificationService Onnx() =>
+        ActivatorUtilities.CreateInstance<OnnxItemClassificationService>(provider);
+
+    IItemClassificationService Service() =>
+        ActivatorUtilities.CreateInstance<ItemClassificationService>(provider);
+
+    if (string.Equals(mode, "service", StringComparison.OrdinalIgnoreCase)) return Service();
+    if (string.Equals(mode, "onnx", StringComparison.OrdinalIgnoreCase)) return Onnx();
+
+    var onnx = Onnx();
+    return onnx.IsConfigured ? onnx : Service();
+});
 builder.Services.AddSignalR();
 
 builder.Services.AddCors(option =>

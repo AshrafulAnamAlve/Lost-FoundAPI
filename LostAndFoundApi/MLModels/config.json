@@ -1,0 +1,12 @@
+{
+  "input_size": [
+    224,
+    224
+  ],
+  "input_name": "inference_input",
+  "output_name": "output_0",
+  "preprocessing": "internal",
+  "note": "Model has TrueDivide+Subtract inside. Feed RAW 0-255 float32. Do NOT normalize.",
+  "num_classes": 4,
+  "recommended_threshold": 0.65
+}

@@ -12,14 +12,19 @@ namespace LostAndFoundApi.Controllers
     {
         private readonly AppDbContext context;
         private readonly IItemSimilarityService itemSimilarityService;
+        private readonly IItemClassificationService itemClassificationService;
 
         // Show at most this many suggestions, best first.
         private const int MaxSuggestions = 5;
 
-        public LostAndFoundController(AppDbContext context, IItemSimilarityService itemSimilarityService)
+        public LostAndFoundController(
+            AppDbContext context,
+            IItemSimilarityService itemSimilarityService,
+            IItemClassificationService itemClassificationService)
         {
             this.context = context;
             this.itemSimilarityService = itemSimilarityService;
+            this.itemClassificationService = itemClassificationService;
         }
 
         // Score every found item against a lost item, drop the owner's own posts and
@@ -163,6 +168,38 @@ namespace LostAndFoundApi.Controllers
             });
         }
 
+        // Classifies a photo without storing anything, so the report form can show
+        // what the model thinks while the user is still filling it in.
+        //
+        // This exists as its own endpoint because of the order the UI posts things:
+        // PostLost/PostFound creates the item (and runs matching) first, and only
+        // then does UploadImage attach the photo. By that point matching has already
+        // run. Classifying up front lets the detected category travel with the form,
+        // so the very first match pass can use it.
+        [HttpPost("ClassifyImage")]
+        public async Task<ActionResult> ClassifyImage(IFormFile image)
+        {
+            if (image == null || image.Length == 0)
+                return BadRequest("No image provided.");
+
+            using var stream = image.OpenReadStream();
+            var result = await itemClassificationService.ClassifyAsync(stream, image.FileName, HttpContext.RequestAborted);
+
+            // A failure is reported in the body with 200, not as an error status: the
+            // caller is a form that should carry on regardless, and treating "the
+            // classifier is off" as a client-visible error would make it look broken.
+            return Ok(new
+            {
+                label = result.Label,
+                confidence = Math.Round(result.Confidence, 4),
+                known = result.Known,
+                category = result.Category,
+                scores = result.Scores,
+                available = result.Error is null,
+                error = result.Error
+            });
+        }
+
         [HttpPost("UploadImage/{type}/{id}")]
         public async Task<ActionResult> UploadImage(string type, int id, IFormFile image)
         {
@@ -188,12 +225,36 @@ namespace LostAndFoundApi.Controllers
                 var item = context.Losts.Find(id);
                 if (item == null) return NotFound("Lost item not found.");
                 item.imageUrl = imageUrl;
+
+                // Backstop. The report form classifies up front via ClassifyImage and
+                // sends the answer with the item, which is what lets the first match
+                // pass use it. This fills the gap for any client that did not, and
+                // never overwrites a value that is already there.
+                if (string.IsNullOrWhiteSpace(item.detectedCategory))
+                {
+                    var detected = await ClassifyUploadAsync(image);
+                    if (detected is not null)
+                    {
+                        item.detectedCategory = detected.Value.Category;
+                        item.detectedConfidence = detected.Value.Confidence;
+                    }
+                }
             }
             else if (type.ToLower() == "found")
             {
                 var item = context.Founds.Find(id);
                 if (item == null) return NotFound("Found item not found.");
                 item.imageUrl = imageUrl;
+
+                if (string.IsNullOrWhiteSpace(item.detectedCategory))
+                {
+                    var detected = await ClassifyUploadAsync(image);
+                    if (detected is not null)
+                    {
+                        item.detectedCategory = detected.Value.Category;
+                        item.detectedConfidence = detected.Value.Confidence;
+                    }
+                }
             }
             else if (type.ToLower() == "user")
             {
@@ -238,6 +299,25 @@ namespace LostAndFoundApi.Controllers
             DeleteUploadedFile(imageUrl);
 
             return Ok(new { message = "Item deleted successfully" });
+        }
+
+        // The detected app category for an upload, or null when the classifier is
+        // switched off, unreachable, or simply not confident enough to commit.
+        //
+        // Only a confident answer is stored. An unsure guess is worse than nothing
+        // here: it would be indistinguishable from a certain one later, when the
+        // matching engine reads the column.
+        private async Task<(string Category, double Confidence)?> ClassifyUploadAsync(IFormFile image)
+        {
+            if (!itemClassificationService.IsConfigured) return null;
+
+            using var stream = image.OpenReadStream();
+            var result = await itemClassificationService.ClassifyAsync(
+                stream, image.FileName, HttpContext.RequestAborted);
+
+            return result.Known && result.Category is not null
+                ? (result.Category, result.Confidence)
+                : null;
         }
 
         // Removes the physical upload backing an item's imageUrl (e.g. "/uploads/lost/xyz.jpg").

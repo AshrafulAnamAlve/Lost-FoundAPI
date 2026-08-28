@@ -40,9 +40,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+import classifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,6 +103,10 @@ async def lifespan(_: FastAPI):
         log.error("Text model failed to load: %s", state["text_error"])
 
     load_image_model()
+
+    # The item classifier (models/model.onnx). Separate from load_image_model
+    # above, which serves the older, generic /embed/image endpoint.
+    classifier.load()
 
     yield
 
@@ -288,6 +294,7 @@ def health():
         "imageSize": state["image_size"],
         "imageLayout": state["image_layout"],
         "imageHasEmbedding": state["image_embed_output"] is not None,
+        "classifier": classifier.status(),
         "uptimeSeconds": round(time.time() - float(state["started_at"] or time.time()), 1),
     }
 
@@ -414,6 +421,75 @@ def embed_image(req: ClassifyRequest):
         "labels": top,
         "vectors": vectors,
         "dim": dim,
+        "tookMs": round((time.perf_counter() - began) * 1000, 2),
+    }
+
+
+@app.post("/classify/image")
+async def classify_image(file: UploadFile = File(...)):
+    """
+    Classifies one item photo with the exported MobileNetV2 device classifier.
+
+    Deliberately NOT folded into /embed/image above. That endpoint answers a
+    different question (give me a vector for visual similarity), reads a
+    different set of files, and applies a rescale to its input — which this
+    model must not receive, because its preprocessing is baked into the graph.
+    Sharing one endpoint would have meant one of the two silently misbehaving.
+
+    Takes a multipart upload rather than base64 so the .NET API can forward the
+    IFormFile it already has, without a re-encode.
+
+    Response:
+        {
+          "model": "model.onnx",
+          "label": "Laptop" | null,     # null when under the threshold
+          "confidence": 0.9312,
+          "known": true,
+          "threshold": 0.65,
+          "scores": {"Calculator": 0.01, "Laptop": 0.93, ...},
+          "topK": [...],
+          "tookMs": 41.2
+        }
+
+    `label: null` with `known: false` is a normal answer, not an error: it means
+    the photo does not confidently look like any of the four classes, and the
+    caller should fall back to asking the user.
+    """
+    if not classifier.is_ready():
+        return JSONResponse(
+            status_code=503,
+            content={"error": "classifier not configured", "detail": classifier.status()["error"]},
+        )
+
+    raw = await file.read()
+    if not raw:
+        return JSONResponse(status_code=400, content={"error": "empty upload"})
+
+    began = time.perf_counter()
+    try:
+        result = classifier.classify([raw])[0]
+    except Exception as exc:  # noqa: BLE001 - a bad upload must not 500 the service
+        log.error("Classification failed: %s: %s", type(exc).__name__, exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "classification failed", "detail": f"{type(exc).__name__}: {exc}"},
+        )
+
+    # A decode failure is the caller's input problem, not a server fault.
+    if result["error"] is not None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "image could not be read", "detail": result["error"]},
+        )
+
+    return {
+        "model": classifier.status()["model"],
+        "label": result["label"],
+        "confidence": result["confidence"],
+        "known": result["known"],
+        "threshold": classifier.threshold(),
+        "scores": result["scores"],
+        "topK": result["topK"],
         "tookMs": round((time.perf_counter() - began) * 1000, 2),
     }
 

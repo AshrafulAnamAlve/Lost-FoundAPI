@@ -15,7 +15,25 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="4.1.1" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.0" />
+  </ItemGroup>
+
+  <!--
+    The image classifier's weights, read at runtime by OnnxItemClassificationService.
+    They have to be listed here or they stay on the development machine: the host runs
+    whatever `dotnet publish` produced, and content is only published when something
+    copies it to the output.
+
+    These are a copy of ml_service/models/. Both are needed - the Python service loads
+    that copy, this process loads this one - so re-export replaces both, together.
+  -->
+  <ItemGroup>
+    <!-- Include for .onnx, Update for .json: the Web SDK already treats every .json
+         under the project as content, and listing one twice is a build error. -->
+    <Content Include="MLModels\**\*.onnx" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Update="MLModels\**\*.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

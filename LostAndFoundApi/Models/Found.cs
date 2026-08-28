@@ -21,5 +21,11 @@ namespace LostAndFoundApi.Models
         public string? altContact { get; set; }
         public int userId { get;set; }
         public string? imageUrl { get; set; }
+
+        // See the note on Lost.detectedCategory - deliberately separate from the
+        // user-chosen `category`, which drives a hard gate the model must not reach.
+        public string? detectedCategory { get; set; }
+
+        public double? detectedConfidence { get; set; }
     }
 }

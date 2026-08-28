@@ -7,4 +7,9 @@ sentence-transformers==5.1.2
 # wheel for Python 3.14, and ONNX is smaller and faster on CPU anyway.
 onnxruntime==1.28.0
 pillow==12.3.0
+numpy==2.5.1
+
+# Required by FastAPI to accept the multipart upload on /classify/image.
+# Without it that endpoint raises at import time, not at request time.
+python-multipart==0.0.20
 
