@@ -15,7 +15,16 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
+    <!--
+      Pinned to 1.22.0 on purpose: it is the LAST version that ships a win-x86 build.
+      1.23.0 dropped runtimes/win-x86 entirely, and the site runs in a 32-bit IIS app
+      pool, so anything newer cannot load at all there - the classifier reports a
+      TypeInitializationException and every item posts without a category.
+
+      Before upgrading, check /api/health: if `classifier.runtime` still says
+      "X86 process", the pool is still 32-bit and this pin has to stay.
+    -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.22.0" />
     <PackageReference Include="Microsoft.OpenApi" Version="2.12.2" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.0" />
@@ -44,27 +53,23 @@
   </ItemGroup>
 
   <!--
-    ONNX Runtime ships a native build for every platform it supports - Android, iOS,
-    macOS and Linux included - and a portable publish copies all of them. That is
-    235 MB of the 274 MB output, none of it reachable: this deploys to Windows IIS
-    over Web Deploy, on a metered upload to a free host.
-
-    Only the foreign platforms are dropped. Every runtimes\win* folder stays, so a
-    32-bit or ARM app pool still finds its own onnxruntime.dll, and so does
-    runtimes\unix, which SqlClient uses. Nothing here is specific to ONNX Runtime -
-    any package with the same layout is trimmed the same way.
-  -->
-  <!--
-    onnxruntime.dll imports MSVCP140, MSVCP140_1, VCRUNTIME140 and VCRUNTIME140_1 -
-    the Visual C++ runtime. A developer machine has it because Visual Studio installs
-    it; a shared host often does not, and there is no way to run an installer there.
-    Without it the DLL will not load and the classifier reports a
-    TypeInitializationException with no hint as to why.
+    onnxruntime.dll imports the Visual C++ runtime - MSVCP140, MSVCP140_1 and
+    VCRUNTIME140, plus VCRUNTIME140_1 in the 64-bit build only. A developer machine
+    has it because Visual Studio installs it; a shared host often does not, and there
+    is no way to run an installer there. Without it the DLL will not load and the
+    classifier reports a TypeInitializationException with no hint as to why.
 
     They go beside onnxruntime.dll rather than in the app root on purpose: .NET loads
     it by full path with LOAD_WITH_ALTERED_SEARCH_PATH, so Windows resolves its
     imports from that DLL's own folder first. Under IIS in-process hosting the app
     root is not the process directory, so putting them there would not reliably work.
+
+    Both architectures ship because the app pool's bitness is the host's choice, not
+    ours, and it is not visible from here - win-x86 came from SysWOW64, win-x64 from
+    System32. The folders are named win-x64/win-x86 rather than x64/x86 because the
+    Visual Studio .gitignore ignores x64/ and x86/ as build output - under those
+    names the files never reach the repository, and a publish from a second machine
+    silently loses them.
 
     Publish only - a local build does not need them, and copying them into bin would
     shadow the machine's own copies for no reason.
@@ -73,26 +78,40 @@
     <ItemGroup>
       <!-- Anything already queued from NativeSupport\ would land in a folder nothing
            looks in, and two entries for one file is a hard error - so drop those
-           first, then add them back under the path they need. -->
-      <ResolvedFileToPublish
-        Remove="@(ResolvedFileToPublish)"
-        Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').StartsWith('NativeSupport'))" />
+           first, then add them back under the paths they need. -->
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').StartsWith('NativeSupport'))" />
 
-      <!-- Qualified metadata (%(VcRuntimeFile.Filename)), not bare %(Filename): the
+      <!-- Qualified metadata (%(VcRuntimeX64.Filename)), not bare %(Filename): the
            unqualified form batches over the wrong item list here and resolves empty. -->
-      <VcRuntimeFile Include="NativeSupport\*.dll" />
-      <ResolvedFileToPublish Include="@(VcRuntimeFile)">
-        <RelativePath>runtimes\win-x64\native\%(VcRuntimeFile.Filename)%(VcRuntimeFile.Extension)</RelativePath>
+      <VcRuntimeX64 Include="NativeSupport\win-x64\*.dll" />
+      <VcRuntimeX86 Include="NativeSupport\win-x86\*.dll" />
+
+      <ResolvedFileToPublish Include="@(VcRuntimeX64)">
+        <RelativePath>runtimes\win-x64\native\%(VcRuntimeX64.Filename)%(VcRuntimeX64.Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+
+      <ResolvedFileToPublish Include="@(VcRuntimeX86)">
+        <RelativePath>runtimes\win-x86\native\%(VcRuntimeX86.Filename)%(VcRuntimeX86.Extension)</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </ResolvedFileToPublish>
     </ItemGroup>
   </Target>
 
+  <!--
+    ONNX Runtime ships a native build for every platform it supports - Android, iOS,
+    macOS and Linux included - and a portable publish copies all of them. That is
+    235 MB of the 274 MB output, none of it reachable: this deploys to Windows IIS
+    over Web Deploy, on a metered upload to a free host.
+
+    Only the foreign platforms are dropped. Every runtimes\win* folder stays - which
+    matters, because win-x86 is the one this host actually loads - and so does
+    runtimes\unix, which SqlClient uses. Nothing here is specific to ONNX Runtime;
+    any package with the same layout is trimmed the same way.
+  -->
   <Target Name="RemoveForeignNativeRuntimes" AfterTargets="ComputeFilesToPublish">
     <ItemGroup>
-      <ResolvedFileToPublish
-        Remove="@(ResolvedFileToPublish)"
-        Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(ResolvedFileToPublish.RelativePath)', '^runtimes[\\/](android|ios|linux|osx|maccatalyst|browser)'))" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(ResolvedFileToPublish.RelativePath)', '^runtimes[\\/](android|ios|linux|osx|maccatalyst|browser)'))" />
     </ItemGroup>
   </Target>
 

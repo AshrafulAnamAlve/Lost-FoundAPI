@@ -168,19 +168,6 @@ namespace LostAndFoundApi.Services
                     // and competes with the web server for the same cores.
                     // Fully qualified: ASP.NET has a SessionOptions of its own, for
                     // HTTP sessions, and ImplicitUsings pulls it into scope here.
-                    // ONNX Runtime publishes no win-x86 build, so a 32-bit app pool
-                    // cannot load it however the files are arranged. Say that plainly
-                    // rather than letting it surface as a TypeInitializationException
-                    // that reads like a missing dependency.
-                    if (RuntimeInformation.ProcessArchitecture == Architecture.X86)
-                    {
-                        loadError =
-                            "the app pool is running 32-bit, and ONNX Runtime ships no win-x86 build - "
-                            + "switch the site to a 64-bit app pool, or host the model out of process";
-                        logger.LogError("Image classifier: {Error}", loadError);
-                        return;
-                    }
-
                     var options = new Microsoft.ML.OnnxRuntime.SessionOptions
                     {
                         IntraOpNumThreads = 1,
