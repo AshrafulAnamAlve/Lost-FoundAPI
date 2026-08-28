@@ -28,5 +28,11 @@ namespace LostAndFoundApi.Models
 
         // Why the model could not be loaded, when it could not be.
         public string? Error { get; set; }
+
+        // Process architecture and framework. Present because the likeliest reasons a
+        // native library will not load on a host you cannot log into are structural -
+        // a 32-bit app pool, or a missing C runtime - and the exception alone does not
+        // say which.
+        public string? Runtime { get; set; }
     }
 }

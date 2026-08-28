@@ -4,6 +4,7 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 
 namespace LostAndFoundApi.Services
@@ -98,6 +99,7 @@ namespace LostAndFoundApi.Services
                     Ready = false,
                     Source = Path.GetFileName(ModelPath),
                     Error = $"no model file at {Path.GetFileName(ModelPath)}",
+                    Runtime = RuntimeDescription(),
                 };
             }
 
@@ -112,6 +114,7 @@ namespace LostAndFoundApi.Services
                 Classes = classNames,
                 Threshold = threshold,
                 Error = loadError,
+                Runtime = RuntimeDescription(),
             };
         }
 
@@ -165,6 +168,19 @@ namespace LostAndFoundApi.Services
                     // and competes with the web server for the same cores.
                     // Fully qualified: ASP.NET has a SessionOptions of its own, for
                     // HTTP sessions, and ImplicitUsings pulls it into scope here.
+                    // ONNX Runtime publishes no win-x86 build, so a 32-bit app pool
+                    // cannot load it however the files are arranged. Say that plainly
+                    // rather than letting it surface as a TypeInitializationException
+                    // that reads like a missing dependency.
+                    if (RuntimeInformation.ProcessArchitecture == Architecture.X86)
+                    {
+                        loadError =
+                            "the app pool is running 32-bit, and ONNX Runtime ships no win-x86 build - "
+                            + "switch the site to a 64-bit app pool, or host the model out of process";
+                        logger.LogError("Image classifier: {Error}", loadError);
+                        return;
+                    }
+
                     var options = new Microsoft.ML.OnnxRuntime.SessionOptions
                     {
                         IntraOpNumThreads = 1,
@@ -220,8 +236,8 @@ namespace LostAndFoundApi.Services
                 }
                 catch (Exception ex)
                 {
-                    loadError = $"{ex.GetType().Name}: {ex.Message}";
-                    logger.LogError("Image classifier failed to load: {Error}", loadError);
+                    loadError = Explain(ex);
+                    logger.LogError(ex, "Image classifier failed to load: {Error}", loadError);
                 }
             }
         }
@@ -453,6 +469,28 @@ namespace LostAndFoundApi.Services
                 ? Array.ConvertAll(exponentiated, value => value / total)
                 : Array.ConvertAll(row, value => (double)value);
         }
+
+        // A native library that will not load surfaces as a TypeInitializationException
+        // whose own message says nothing useful - the reason is always one level down,
+        // and sometimes two. Flatten the chain so /api/health carries the whole thing:
+        // on a host you cannot log into, this is the only copy of it you will ever see.
+        private static string Explain(Exception exception)
+        {
+            var parts = new List<string>();
+
+            for (var current = exception; current is not null; current = current.InnerException)
+            {
+                parts.Add($"{current.GetType().Name}: {current.Message}");
+            }
+
+            return string.Join(" <- ", parts);
+        }
+
+        // Both halves matter: ONNX Runtime has no win-x86 build, so a 32-bit pool can
+        // never work, and the framework version pins down which C runtime is expected.
+        private static string RuntimeDescription() =>
+            $"{RuntimeInformation.ProcessArchitecture} process, {RuntimeInformation.FrameworkDescription}, "
+            + $"{RuntimeInformation.OSDescription}";
 
         private static ImageClassificationResult Failed(string error) =>
             new() { Known = false, Error = error };

@@ -35,6 +35,65 @@
          under the project as content, and listing one twice is a build error. -->
     <Content Include="MLModels\**\*.onnx" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Update="MLModels\**\*.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+
+    <!-- The Web SDK publishes any loose file under the project as content, which would
+         put these in a NativeSupport\ folder where nothing looks for them. The target
+         below places them where they are actually needed instead. -->
+    <Content Remove="NativeSupport\**" />
+    <None Include="NativeSupport\**" />
   </ItemGroup>
+
+  <!--
+    ONNX Runtime ships a native build for every platform it supports - Android, iOS,
+    macOS and Linux included - and a portable publish copies all of them. That is
+    235 MB of the 274 MB output, none of it reachable: this deploys to Windows IIS
+    over Web Deploy, on a metered upload to a free host.
+
+    Only the foreign platforms are dropped. Every runtimes\win* folder stays, so a
+    32-bit or ARM app pool still finds its own onnxruntime.dll, and so does
+    runtimes\unix, which SqlClient uses. Nothing here is specific to ONNX Runtime -
+    any package with the same layout is trimmed the same way.
+  -->
+  <!--
+    onnxruntime.dll imports MSVCP140, MSVCP140_1, VCRUNTIME140 and VCRUNTIME140_1 -
+    the Visual C++ runtime. A developer machine has it because Visual Studio installs
+    it; a shared host often does not, and there is no way to run an installer there.
+    Without it the DLL will not load and the classifier reports a
+    TypeInitializationException with no hint as to why.
+
+    They go beside onnxruntime.dll rather than in the app root on purpose: .NET loads
+    it by full path with LOAD_WITH_ALTERED_SEARCH_PATH, so Windows resolves its
+    imports from that DLL's own folder first. Under IIS in-process hosting the app
+    root is not the process directory, so putting them there would not reliably work.
+
+    Publish only - a local build does not need them, and copying them into bin would
+    shadow the machine's own copies for no reason.
+  -->
+  <Target Name="PublishVisualCppRuntimeBesideOnnx" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <!-- Anything already queued from NativeSupport\ would land in a folder nothing
+           looks in, and two entries for one file is a hard error - so drop those
+           first, then add them back under the path they need. -->
+      <ResolvedFileToPublish
+        Remove="@(ResolvedFileToPublish)"
+        Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').StartsWith('NativeSupport'))" />
+
+      <!-- Qualified metadata (%(VcRuntimeFile.Filename)), not bare %(Filename): the
+           unqualified form batches over the wrong item list here and resolves empty. -->
+      <VcRuntimeFile Include="NativeSupport\*.dll" />
+      <ResolvedFileToPublish Include="@(VcRuntimeFile)">
+        <RelativePath>runtimes\win-x64\native\%(VcRuntimeFile.Filename)%(VcRuntimeFile.Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="RemoveForeignNativeRuntimes" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish
+        Remove="@(ResolvedFileToPublish)"
+        Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(ResolvedFileToPublish.RelativePath)', '^runtimes[\\/](android|ios|linux|osx|maccatalyst|browser)'))" />
+    </ItemGroup>
+  </Target>
 
 </Project>

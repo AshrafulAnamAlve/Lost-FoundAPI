@@ -79,6 +79,7 @@ namespace LostAndFoundApi.Controllers
                     source = classifier.Source,
                     classes = classifier.Classes,
                     threshold = classifier.Threshold,
+                    runtime = classifier.Runtime,
                     error = classifier.Error
                 }
             });
