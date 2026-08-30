@@ -101,6 +101,36 @@ namespace LostAndFoundApi.Services
             new(StringComparer.OrdinalIgnoreCase)
             { "laptop", "phone", "jewelry", "calculator", "electronics" };
 
+        // The form categories that do NOT contradict a detection, so a report form can
+        // tell "you picked something else" from "you picked a broader bucket".
+        //
+        // Deliberately stricter than the scoring engine's RelatedCategoryGroups, which
+        // treats phone, laptop, electronics and calculator as all related. That
+        // leniency exists so one wrong category cannot destroy a real match - it is the
+        // right call there and the wrong one here, because "the photo is a laptop and
+        // you chose Mobile Phone" is exactly the mistake worth pointing out.
+        //
+        // What is allowed instead is a genuinely broader bucket: "Other Electronics"
+        // over a laptop is a reasonable filing choice, not an error, and so is
+        // "Jewelry" over a watch - CategorySynonyms folds watch into jewelry, so the
+        // matching engine already reads them as the same thing.
+        private static readonly Dictionary<string, string[]> AcceptableCategories =
+            new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["laptop"] = ["laptop", "electronics"],
+                ["phone"] = ["phone", "electronics"],
+                ["calculator"] = ["calculator", "electronics"],
+                ["watch"] = ["watch", "jewelry"],
+            };
+
+        // Empty when the detection maps to nothing known, which the caller must read as
+        // "no opinion" - never as "everything conflicts".
+        public static string[] AcceptableCategoriesFor(string? category) =>
+            !string.IsNullOrWhiteSpace(category)
+            && AcceptableCategories.TryGetValue(category, out var acceptable)
+                ? acceptable
+                : [];
+
         public static string? CategoryForLabel(string? label) =>
             !string.IsNullOrWhiteSpace(label) && LabelToCategory.TryGetValue(label, out var category)
                 ? category

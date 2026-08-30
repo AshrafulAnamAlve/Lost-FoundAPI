@@ -194,6 +194,10 @@ namespace LostAndFoundApi.Controllers
                 confidence = Math.Round(result.Confidence, 4),
                 known = result.Known,
                 category = result.Category,
+                // The categories the form may keep without contradicting this photo, so
+                // the client does not have to carry its own copy of the mapping and let
+                // the two drift apart.
+                acceptableCategories = ItemClassificationService.AcceptableCategoriesFor(result.Category),
                 scores = result.Scores,
                 available = result.Error is null,
                 error = result.Error
