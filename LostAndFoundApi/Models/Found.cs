@@ -27,5 +27,24 @@ namespace LostAndFoundApi.Models
         public string? detectedCategory { get; set; }
 
         public double? detectedConfidence { get; set; }
+
+        // ── Resolution ─────────────────────────────────────────────────────────
+        //
+        // Null on every report filed before this shipped, which reads as "open" —
+        // so nothing about existing rows changes. Set once the item is actually
+        // back with its owner.
+        public string? status { get; set; }
+
+        public DateTime? resolvedAt { get; set; }
+
+        // Who it was settled with, when the user says so. Both stay null when
+        // somebody resolves an item without naming anyone, which is allowed: the
+        // matching engine is not always right, and an item can come back through
+        // a friend, a notice board or the front desk.
+        public int? resolvedWithUserId { get; set; }
+        public int? resolvedWithItemId { get; set; }
+
+        /// <summary>Whatever the user wants on the record, e.g. "handed over at the front desk".</summary>
+        public string? resolvedNote { get; set; }
     }
 }

@@ -75,6 +75,21 @@ namespace LostAndFoundApi.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<DateTime?>("resolvedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("resolvedNote")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("resolvedWithItemId")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("resolvedWithUserId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("status")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("timeLost")
                         .HasColumnType("nvarchar(max)");
 
@@ -149,6 +164,21 @@ namespace LostAndFoundApi.Migrations
 
                     b.Property<string>("phoneNumber")
                         .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("resolvedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("resolvedNote")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("resolvedWithItemId")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("resolvedWithUserId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("status")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("timeLost")

@@ -1,4 +1,4 @@
-﻿using LostAndFoundApi.Models;
+using LostAndFoundApi.Models;
 using LostAndFoundApi.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -32,7 +32,9 @@ namespace LostAndFoundApi.Controllers
         private async Task<List<object>> FindFoundMatchesAsync(Lost lost)
         {
             var candidates = context.Founds
-                .Where(f => lost.userId == 0 || f.userId != lost.userId)
+                .Where(f => (lost.userId == 0 || f.userId != lost.userId)
+                         // An item already back with its owner is not a suggestion.
+                         && (f.status == null || f.status != ItemStatus.Resolved))
                 .ToList();
 
             // Fetch every embedding this pass needs in one batch. Without it the loop
@@ -76,7 +78,8 @@ namespace LostAndFoundApi.Controllers
         private async Task<List<object>> FindLostMatchesAsync(Found found)
         {
             var candidates = context.Losts
-                .Where(l => found.userId == 0 || l.userId != found.userId)
+                .Where(l => (found.userId == 0 || l.userId != found.userId)
+                         && (l.status == null || l.status != ItemStatus.Resolved))
                 .ToList();
 
             await itemSimilarityService.PrimeAsync(found, candidates);
@@ -273,6 +276,122 @@ namespace LostAndFoundApi.Controllers
 
             context.SaveChanges();
             return Ok(new { message = "Image uploaded successfully", imageUrl });
+        }
+
+        // ── Closing a report off ───────────────────────────────────────────────
+        //
+        // Two people who match talk to each other, one hands the item over, and
+        // then each closes their own report: the owner marks their lost report
+        // returned, the finder marks their found report handed over. Naming the
+        // other person is optional — the matching engine is not always right, and
+        // an item that came back through a friend or the front desk still has to
+        // be closable.
+        //
+        // Only the person who filed a report can close it. Nobody gets to change
+        // somebody else's record, which is also why closing one side deliberately
+        // leaves the other side open for its own owner to confirm.
+
+        [HttpPost("MarkResolved")]
+        public ActionResult MarkResolved(ResolveRequest request)
+        {
+            if (request == null) return BadRequest(new { message = "Invalid data." });
+
+            var type = (request.type ?? "").ToLower();
+            var note = string.IsNullOrWhiteSpace(request.note) ? null : request.note.Trim();
+
+            // When a counterpart report is named, believe the report over the
+            // caller for whose it is.
+            var counterpartUserId = request.counterpartUserId;
+            if (request.counterpartItemId is int otherId)
+            {
+                counterpartUserId = type == "lost"
+                    ? context.Founds.Find(otherId)?.userId ?? counterpartUserId
+                    : context.Losts.Find(otherId)?.userId ?? counterpartUserId;
+            }
+
+            if (type == "lost")
+            {
+                var item = context.Losts.Find(request.id);
+                if (item == null) return NotFound(new { message = "Lost item not found." });
+                if (item.userId != request.userId)
+                    return StatusCode(403, new { message = "Only the person who reported this item can close it." });
+
+                item.status             = ItemStatus.Resolved;
+                item.resolvedAt         = DateTime.UtcNow;
+                item.resolvedWithUserId = counterpartUserId;
+                item.resolvedWithItemId = request.counterpartItemId;
+                item.resolvedNote       = note;
+            }
+            else if (type == "found")
+            {
+                var item = context.Founds.Find(request.id);
+                if (item == null) return NotFound(new { message = "Found item not found." });
+                if (item.userId != request.userId)
+                    return StatusCode(403, new { message = "Only the person who reported this item can close it." });
+
+                item.status             = ItemStatus.Resolved;
+                item.resolvedAt         = DateTime.UtcNow;
+                item.resolvedWithUserId = counterpartUserId;
+                item.resolvedWithItemId = request.counterpartItemId;
+                item.resolvedNote       = note;
+            }
+            else
+            {
+                return BadRequest(new { message = "Invalid type. Must be 'lost' or 'found'." });
+            }
+
+            context.SaveChanges();
+            return Ok(new
+            {
+                message = type == "lost" ? "Marked as returned" : "Marked as handed over",
+                status = ItemStatus.Resolved,
+                resolvedAt = DateTime.UtcNow,
+                resolvedWithUserId = counterpartUserId,
+                resolvedWithItemId = request.counterpartItemId,
+                resolvedNote = note,
+            });
+        }
+
+        /// <summary>Undo: closing a report by mistake must not be permanent.</summary>
+        [HttpPost("Reopen")]
+        public ActionResult Reopen(ResolveRequest request)
+        {
+            if (request == null) return BadRequest(new { message = "Invalid data." });
+            var type = (request.type ?? "").ToLower();
+
+            if (type == "lost")
+            {
+                var item = context.Losts.Find(request.id);
+                if (item == null) return NotFound(new { message = "Lost item not found." });
+                if (item.userId != request.userId)
+                    return StatusCode(403, new { message = "Only the person who reported this item can reopen it." });
+
+                item.status = ItemStatus.Open;
+                item.resolvedAt = null;
+                item.resolvedWithUserId = null;
+                item.resolvedWithItemId = null;
+                item.resolvedNote = null;
+            }
+            else if (type == "found")
+            {
+                var item = context.Founds.Find(request.id);
+                if (item == null) return NotFound(new { message = "Found item not found." });
+                if (item.userId != request.userId)
+                    return StatusCode(403, new { message = "Only the person who reported this item can reopen it." });
+
+                item.status = ItemStatus.Open;
+                item.resolvedAt = null;
+                item.resolvedWithUserId = null;
+                item.resolvedWithItemId = null;
+                item.resolvedNote = null;
+            }
+            else
+            {
+                return BadRequest(new { message = "Invalid type. Must be 'lost' or 'found'." });
+            }
+
+            context.SaveChanges();
+            return Ok(new { message = "Report reopened", status = ItemStatus.Open });
         }
 
         [HttpDelete("Delete/{type}/{id}")]
