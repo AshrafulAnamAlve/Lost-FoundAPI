@@ -11,6 +11,7 @@ namespace LostAndFoundApi.Services
         private readonly IHttpClientFactory httpClientFactory;
         private readonly IConfiguration configuration;
         private readonly ILogger<ItemSimilarityService> logger;
+        private readonly ITextEmbeddingService textEmbedder;
 
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<double>> embeddingCache = new(StringComparer.Ordinal);
 
@@ -26,11 +27,30 @@ namespace LostAndFoundApi.Services
         public ItemSimilarityService(
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
-            ILogger<ItemSimilarityService> logger)
+            ILogger<ItemSimilarityService> logger,
+            ITextEmbeddingService textEmbedder)
         {
             this.httpClientFactory = httpClientFactory;
             this.configuration = configuration;
             this.logger = logger;
+            this.textEmbedder = textEmbedder;
+        }
+
+        private const string InProcessProvider = "onnx (in-process)";
+
+        // The in-process model: no network, no key, no metered credits. Tried before
+        // every HTTP provider because it is the cheapest and the most dependable.
+        private List<List<double>>? EmbedInProcess(string[] texts)
+        {
+            if (!textEmbedder.IsConfigured) return null;
+            var vectors = textEmbedder.Embed(texts);
+            if (vectors is null || vectors.Count != texts.Length)
+            {
+                status.LastError = textEmbedder.LastError ?? "In-process text model returned no vectors.";
+                return null;
+            }
+            RecordSuccess(InProcessProvider, textEmbedder.Source, vectors[0].Count);
+            return vectors;
         }
 
         // Base URL of the self-hosted ML service (see /ml_service). Preferred over the
@@ -51,7 +71,9 @@ namespace LostAndFoundApi.Services
             var wasAvailable = status.Available;
             status.LastAttemptAt = DateTime.UtcNow;
 
-            if (await ProbeLocalServiceAsync(cancellationToken) || await ProbeHuggingFaceAsync(cancellationToken))
+            if (EmbedInProcess(new[] { "health probe" }) is { Count: 1 }
+                || await ProbeLocalServiceAsync(cancellationToken)
+                || await ProbeHuggingFaceAsync(cancellationToken))
             {
                 nextRetryAt = DateTime.MinValue;
                 LogAvailabilityTransition(wasAvailable);
@@ -683,6 +705,9 @@ namespace LostAndFoundApi.Services
         // Resolves a batch of texts through whichever provider is available.
         private async Task<List<List<double>>?> GetEmbeddingsAsync(string[] texts, CancellationToken cancellationToken)
         {
+            var inProcess = EmbedInProcess(texts);
+            if (inProcess is not null) return inProcess;
+
             var baseUrl = LocalServiceUrl;
             if (!string.IsNullOrWhiteSpace(baseUrl))
             {
@@ -744,7 +769,7 @@ namespace LostAndFoundApi.Services
             }
         }
 
-        // Resolution order: in-process cache -> self-hosted ML service -> HuggingFace.
+        // Resolution order: cache -> in-process ONNX model -> self-hosted ML service -> HuggingFace.
         // The two texts are fetched in ONE round trip, not two.
         private async Task<(List<double> Lost, List<double> Found)?> GetEmbeddingPairAsync(string lostText, string foundText)
         {
@@ -764,7 +789,16 @@ namespace LostAndFoundApi.Services
 
             status.LastAttemptAt = DateTime.UtcNow;
 
-            // 1) Self-hosted ML service (preferred).
+            // 0) The model inside this process.
+            var own = EmbedInProcess(new[] { lostText, foundText });
+            if (own is { Count: 2 })
+            {
+                embeddingCache[lostText] = own[0];
+                embeddingCache[foundText] = own[1];
+                return (own[0], own[1]);
+            }
+
+            // 1) Self-hosted ML service.
             var baseUrl = LocalServiceUrl;
             if (!string.IsNullOrWhiteSpace(baseUrl))
             {

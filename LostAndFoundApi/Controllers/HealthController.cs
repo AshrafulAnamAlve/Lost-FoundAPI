@@ -81,7 +81,11 @@ namespace LostAndFoundApi.Controllers
                     threshold = classifier.Threshold,
                     runtime = classifier.Runtime,
                     error = classifier.Error
-                }
+                },
+                // The in-process text model holds ~90 MB, and a shared host's app pool
+                // has a memory cap nobody publishes - so the numbers are shown here
+                // rather than discovered through a recycled pool.
+                memory = MemoryInfo()
             });
         }
 
@@ -135,6 +139,19 @@ namespace LostAndFoundApi.Controllers
         }
 
         private static readonly System.Diagnostics.Process Process = System.Diagnostics.Process.GetCurrentProcess();
+
+        private static object MemoryInfo()
+        {
+            Process.Refresh();
+            const double mb = 1024 * 1024;
+            return new
+            {
+                workingSetMb = Math.Round(Process.WorkingSet64 / mb, 1),
+                privateMb = Math.Round(Process.PrivateMemorySize64 / mb, 1),
+                managedHeapMb = Math.Round(GC.GetTotalMemory(false) / mb, 1),
+                is64BitProcess = Environment.Is64BitProcess,
+            };
+        }
 
         private async Task<(bool ok, string? error)> CheckDatabaseAsync(CancellationToken cancellationToken)
         {

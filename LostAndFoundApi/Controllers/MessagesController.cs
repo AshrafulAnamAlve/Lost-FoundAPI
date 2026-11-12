@@ -1,10 +1,15 @@
 using LostAndFoundApi.Hubs;
 using LostAndFoundApi.Models;
+using LostAndFoundApi.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 
 namespace LostAndFoundApi.Controllers
 {
+    // Every action is for the signed-in user only: the sender is taken from their
+    // token, and a conversation can only be read by one of the two people in it.
+    [Authorize]
     [Route("api/[controller]")]
     [ApiController]
     public class MessagesController : ControllerBase
@@ -28,11 +33,21 @@ namespace LostAndFoundApi.Controllers
             public string? itemName { get; set; }
         }
 
+        private int Me => User.UserId();
+
         [HttpPost("Send")]
         public async Task<ActionResult> Send(SendDto dto)
         {
-            if (dto == null || dto.senderId <= 0 || dto.receiverId <= 0 || string.IsNullOrWhiteSpace(dto.content))
+            if (dto == null || dto.receiverId <= 0 || string.IsNullOrWhiteSpace(dto.content))
                 return BadRequest("Invalid message.");
+
+            dto.senderId = Me;
+            if (dto.receiverId == dto.senderId)
+                return BadRequest("You cannot message yourself.");
+            if (!context.Registers.Any(r => r.id == dto.receiverId))
+                return NotFound("That user no longer exists.");
+            if (dto.content.Trim().Length > 2000)
+                return BadRequest("Message is too long.");
 
             var msg = new Message
             {
@@ -58,6 +73,7 @@ namespace LostAndFoundApi.Controllers
         [HttpGet("Conversation/{userId}/{otherUserId}")]
         public async Task<ActionResult> Conversation(int userId, int otherUserId)
         {
+            if (userId != Me) return Forbid();
             var messages = context.Messages
                 .Where(m => (m.senderId == userId && m.receiverId == otherUserId)
                          || (m.senderId == otherUserId && m.receiverId == userId))
@@ -78,6 +94,7 @@ namespace LostAndFoundApi.Controllers
         [HttpGet("Conversations/{userId}")]
         public ActionResult Conversations(int userId)
         {
+            if (userId != Me) return Forbid();
             var mine = context.Messages
                 .Where(m => m.senderId == userId || m.receiverId == userId)
                 .ToList();
@@ -110,6 +127,7 @@ namespace LostAndFoundApi.Controllers
         [HttpGet("UnreadCount/{userId}")]
         public ActionResult UnreadCount(int userId)
         {
+            if (userId != Me) return Forbid();
             var count = context.Messages.Count(m => m.receiverId == userId && !m.isRead);
             return Ok(new { count });
         }

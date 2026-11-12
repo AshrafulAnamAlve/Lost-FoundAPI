@@ -15,7 +15,11 @@ namespace LostAndFoundApi.Models
         public string? timeLost { get; set; }
         public string? brand { get; set; }
         public string? color { get; set; }
-        public string Reward { get; set; }
+        // Optional in the form. Non-nullable in the database, so ASP.NET Core would
+        // otherwise treat it as required and reject any report sent without one with
+        // a bare 400. The controller stores "" in its place.
+        [Microsoft.AspNetCore.Mvc.ModelBinding.Validation.ValidateNever]
+        public string Reward { get; set; } = "";
         public string userName { get; set; }
         public string email { get; set; }
         public string phoneNumber { get; set; }

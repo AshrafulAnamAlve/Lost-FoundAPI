@@ -1,7 +1,13 @@
 using LostAndFoundApi.Hubs;
 using LostAndFoundApi.Models;
 using LostAndFoundApi.Services;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+
+// Uploaded photos are written to wwwroot/uploads and served as static files. The
+// static file server only watches wwwroot if the folder exists when the app starts,
+// so a deployment that ships without one would save photos it can never serve.
+Directory.CreateDirectory(Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "uploads"));
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,6 +24,9 @@ builder.Services.AddDbContext<AppDbContext>(option =>
 });
 
 builder.Services.AddHttpClient();
+// all-MiniLM-L6-v2 run inside this process (MLModels/text). First in the embedding
+// provider chain, so semantic matching no longer depends on a metered API.
+builder.Services.AddSingleton<ITextEmbeddingService, OnnxTextEmbeddingService>();
 builder.Services.AddSingleton<IItemSimilarityService, ItemSimilarityService>();
 // Two ways to run the same image model, picked once at startup.
 //
@@ -49,6 +58,30 @@ builder.Services.AddSingleton<IItemClassificationService>(provider =>
 });
 builder.Services.AddSignalR();
 
+// Sign-in issues a signed token (see AuthTokenService); every endpoint that changes
+// data reads the user from it instead of trusting a user id sent in the request.
+builder.Services.AddSingleton<AuthTokenService>();
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
+builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+    .Configure<AuthTokenService>((options, tokens) =>
+    {
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters = tokens.ValidationParameters;
+        options.Events = new JwtBearerEvents
+        {
+            // Browsers cannot set headers on a WebSocket, so SignalR sends the token
+            // as a query parameter. Accepted for the hub only.
+            OnMessageReceived = context =>
+            {
+                var token = context.Request.Query["access_token"];
+                if (!string.IsNullOrEmpty(token) && context.HttpContext.Request.Path.StartsWithSegments("/chatHub"))
+                    context.Token = token;
+                return Task.CompletedTask;
+            },
+        };
+    });
+builder.Services.AddAuthorization();
+
 builder.Services.AddCors(option =>
 {
     option.AddPolicy("AllowAll", policy =>
@@ -78,6 +111,7 @@ dbContext?.Database.Migrate();
 app.UseHttpsRedirection();
 app.UseStaticFiles();
 app.UseCors("AllowAll");
+app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();

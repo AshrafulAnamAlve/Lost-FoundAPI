@@ -11,7 +11,7 @@ namespace LostAndFoundApi.Models
         // False => matching is currently running on rules alone.
         public bool Available { get; set; }
 
-        // "local" | "huggingface" | "none"
+        // "onnx (in-process)" | "local" | "huggingface" | "none"
         public string Provider { get; set; } = "none";
 
         public string? Endpoint { get; set; }

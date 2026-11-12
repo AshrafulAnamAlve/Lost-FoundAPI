@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.2" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.2" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.2" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.2" />
@@ -44,6 +45,12 @@
          under the project as content, and listing one twice is a build error. -->
     <Content Include="MLModels\**\*.onnx" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Update="MLModels\**\*.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- The text model's WordPiece vocabulary (MLModels\text\vocab.txt). -->
+    <Content Include="MLModels\**\*.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+
+    <!-- Photos uploaded on this machine while testing. They are not part of the app;
+         publishing them would copy local test pictures onto the live site. -->
+    <Content Remove="wwwroot\uploads\**" />
 
     <!-- The Web SDK publishes any loose file under the project as content, which would
          put these in a NativeSupport\ folder where nothing looks for them. The target
