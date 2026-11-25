@@ -1,3 +1,4 @@
+using LostAndFoundApi.Models;
 using LostAndFoundApi.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
@@ -14,15 +15,26 @@ namespace LostAndFoundApi.Hubs
     [Authorize]
     public class ChatHub : Hub
     {
+        private readonly AppDbContext db;
+
+        public ChatHub(AppDbContext db)
+        {
+            this.db = db;
+        }
+
         public static string Group(int userId) => $"user-{userId}";
 
         public override async Task OnConnectedAsync()
         {
             var userId = Context.User?.UserId() ?? 0;
-            if (userId > 0)
+            var user = userId > 0 ? await db.Registers.FindAsync(userId) : null;
+            if (user == null || user.IsBlocked)
             {
-                await Groups.AddToGroupAsync(Context.ConnectionId, Group(userId));
+                Context.Abort();
+                return;
             }
+
+            await Groups.AddToGroupAsync(Context.ConnectionId, Group(userId));
             await base.OnConnectedAsync();
         }
 

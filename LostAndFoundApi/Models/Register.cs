@@ -16,5 +16,10 @@ namespace LostAndFoundApi.Models
         public string City { get; set; }
         public string? imageUrl { get; set; }
 
+        public string Role { get; set; } = "User";
+        public bool IsBlocked { get; set; }
+        public DateTime? BlockedAt { get; set; }
+        public string? BlockReason { get; set; }
+        public DateTime? CreatedAt { get; set; }
     }
 }

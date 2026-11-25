@@ -52,14 +52,17 @@ namespace LostAndFoundApi.Services
             ValidateLifetime = true,
             ClockSkew = TimeSpan.FromMinutes(2),
             NameClaimType = ClaimTypes.Name,
+            RoleClaimType = ClaimTypes.Role,
         };
 
         public string CreateToken(Register user)
         {
+            var role = string.IsNullOrWhiteSpace(user.Role) ? "User" : user.Role;
             var claims = new[]
             {
                 new Claim(ClaimTypes.NameIdentifier, user.id.ToString()),
                 new Claim(ClaimTypes.Name, $"{user.FirstName} {user.LastName}".Trim()),
+                new Claim(ClaimTypes.Role, role),
             };
 
             return new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor
@@ -114,5 +117,30 @@ namespace LostAndFoundApi.Services
         /// <summary>The signed-in user's id from their token, or 0 when there is none.</summary>
         public static int UserId(this ClaimsPrincipal user) =>
             int.TryParse(user.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : 0;
+
+        public static bool IsAdmin(this ClaimsPrincipal user) =>
+            string.Equals(user.FindFirstValue(ClaimTypes.Role), "Admin", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static class UploadedFileHelper
+    {
+        /// <summary>Deletes a stored local upload path ("/uploads/...") safely without path traversal.</summary>
+        public static void Delete(string contentRootPath, string? imageUrl)
+        {
+            if (string.IsNullOrWhiteSpace(imageUrl) || !imageUrl.StartsWith("/uploads/", StringComparison.Ordinal)) return;
+
+            try
+            {
+                var relativePath = imageUrl.Split('?')[0].TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+                var root = Path.GetFullPath(Path.Combine(contentRootPath, "wwwroot", "uploads"));
+                var fullPath = Path.GetFullPath(Path.Combine(contentRootPath, "wwwroot", relativePath));
+                if (fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase) && File.Exists(fullPath))
+                    File.Delete(fullPath);
+            }
+            catch
+            {
+                // A leftover file is harmless; never fail the delete because of it.
+            }
+        }
     }
 }

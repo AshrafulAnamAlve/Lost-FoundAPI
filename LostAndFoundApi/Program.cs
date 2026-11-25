@@ -106,7 +106,7 @@ app.UseSwaggerUI();
 using var serviceScope = app.Services.CreateScope();
 using var dbContext = serviceScope.ServiceProvider.GetService<AppDbContext>();
 dbContext?.Database.Migrate();
-
+SeedAdminAccount(dbContext, app.Configuration);
 
 app.UseHttpsRedirection();
 app.UseStaticFiles();
@@ -114,7 +114,78 @@ app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
 
+// Enforce account blocking immediately on existing tokens (without waiting up to 7 days
+// for JWT expiry) so blocked users cannot continue calling API endpoints or SignalR.
+app.Use(async (context, next) =>
+{
+    if (context.User.Identity?.IsAuthenticated == true)
+    {
+        var uid = context.User.UserId();
+        if (uid > 0)
+        {
+            var db = context.RequestServices.GetRequiredService<AppDbContext>();
+            var userState = await db.Registers
+                .Where(r => r.id == uid)
+                .Select(r => new { r.IsBlocked, r.BlockReason, r.Role })
+                .FirstOrDefaultAsync();
+
+            if (userState == null || userState.IsBlocked)
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    blocked = true,
+                    message = string.IsNullOrWhiteSpace(userState?.BlockReason)
+                        ? "Your account has been blocked by an administrator."
+                        : $"Your account has been blocked by an administrator: {userState.BlockReason}",
+                });
+                return;
+            }
+        }
+    }
+
+    await next();
+});
+
 app.MapControllers();
 app.MapHub<ChatHub>("/chatHub");
 
 app.Run();
+
+static void SeedAdminAccount(AppDbContext? db, IConfiguration config)
+{
+    if (db == null) return;
+
+    var email = (config["Admin:Email"] ?? "admin@lostfound.demo").Trim();
+    var password = config["Admin:Password"] ?? "Admin@2026#Bubt";
+
+    var existing = db.Registers.FirstOrDefault(r => r.Email == email);
+    if (existing == null)
+    {
+        var admin = new Register
+        {
+            FirstName = "System",
+            LastName = "Admin",
+            Email = email,
+            Phone = "01700000000",
+            Address = "BUBT Main Campus, Mirpur 2",
+            City = "Dhaka",
+            Role = "Admin",
+            IsBlocked = false,
+            CreatedAt = DateTime.UtcNow,
+        };
+        admin.Password = PasswordSecurity.Hash(admin, password);
+        db.Registers.Add(admin);
+        db.SaveChanges();
+        return;
+    }
+
+    if (!string.Equals(existing.Role, "Admin", StringComparison.OrdinalIgnoreCase) || existing.IsBlocked)
+    {
+        existing.Role = "Admin";
+        existing.IsBlocked = false;
+        existing.BlockedAt = null;
+        existing.BlockReason = null;
+        db.SaveChanges();
+    }
+}

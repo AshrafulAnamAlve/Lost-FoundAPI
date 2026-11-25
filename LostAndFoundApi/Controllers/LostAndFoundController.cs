@@ -163,6 +163,11 @@ namespace LostAndFoundApi.Controllers
 
             register.id = 0;
             register.imageUrl = null;
+            register.Role = "User";
+            register.IsBlocked = false;
+            register.BlockedAt = null;
+            register.BlockReason = null;
+            register.CreatedAt = DateTime.UtcNow;
             register.Password = PasswordSecurity.Hash(register, register.Password);
 
             context.Registers.Add(register);
@@ -186,12 +191,22 @@ namespace LostAndFoundApi.Controllers
                 context.SaveChanges();
             }
 
+            if (user.IsBlocked)
+            {
+                var msg = string.IsNullOrWhiteSpace(user.BlockReason)
+                    ? "Your account has been blocked by an administrator."
+                    : $"Your account has been blocked by an administrator: {user.BlockReason}";
+                return StatusCode(403, Problem(msg));
+            }
+
+            var role = string.IsNullOrWhiteSpace(user.Role) ? "User" : user.Role;
             return Ok(new
             {
                 message = "Login Successfull",
                 userid = user.id,
                 firstName = user.FirstName,
                 lastName = user.LastName,
+                role,
                 token = tokens.CreateToken(user),
             });
         }
@@ -219,6 +234,7 @@ namespace LostAndFoundApi.Controllers
             address = user.Address,
             city = user.City,
             user.imageUrl,
+            role = string.IsNullOrWhiteSpace(user.Role) ? "User" : user.Role,
         };
 
         [Authorize]
@@ -776,23 +792,8 @@ namespace LostAndFoundApi.Controllers
         }
 
         // Removes the physical upload backing an item's imageUrl (e.g. "/uploads/lost/xyz.jpg").
-        private void DeleteUploadedFile(string? imageUrl)
-        {
-            if (string.IsNullOrWhiteSpace(imageUrl) || !imageUrl.StartsWith("/uploads/")) return;
-
-            try
-            {
-                var relativePath = imageUrl.Split('?')[0].TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
-                var root = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "uploads"));
-                var fullPath = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", relativePath));
-                if (fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase) && System.IO.File.Exists(fullPath))
-                    System.IO.File.Delete(fullPath);
-            }
-            catch
-            {
-                // A leftover file is harmless; never fail the delete because of it.
-            }
-        }
+        private void DeleteUploadedFile(string? imageUrl) =>
+            UploadedFileHelper.Delete(Directory.GetCurrentDirectory(), imageUrl);
 
         // ── Reading ────────────────────────────────────────────────────────────
 
